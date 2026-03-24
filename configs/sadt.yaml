@@ -1,0 +1,52 @@
+# HASTE configuration for SADT dataset
+# 27 subjects, 62 sessions, 30 scalp EEG channels, 500 Hz
+
+dataset: sadt
+data_root: ./data_sadt
+
+# Electrode montage
+num_channels: 30
+num_bands: 5
+adj_k: 7
+adj_sigma: 1.0
+
+# Model architecture (shared with paper Table 2)
+spatial_d_model: 64
+spatial_heads: 4
+spatial_layers: 2
+temporal_d_model: 128
+temporal_heads: 4
+temporal_layers: 1
+temporal_window: 10
+temporal_ff_dim: 512
+d_r: 32
+d_embed: 64
+d_s: 16
+top_k: 3
+
+# Training
+batch_size: 32
+epochs: 100
+lr: 1.0e-3
+weight_decay: 1.0e-4
+dropout: 0.1
+grad_clip: 1.0
+warmup_epochs: 3
+
+# Loss weights
+lambda_pred: 0.1
+lambda_band: 0.01
+lambda_graph: 0.01
+
+# Evaluation
+n_folds: 27               # LOSO: 27 subjects
+fold: 0
+patience: 15
+checkpoint_metric: corr_final
+
+# Misc
+seed: 2025
+amp: true
+cache: true
+augment: true
+num_workers: 4

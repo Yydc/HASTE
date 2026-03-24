@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.env/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (large, not tracked)
+data_seed_vig/
+data_sadt/
+data_mpddf/
+*.mat
+
+# Checkpoints & logs
+checkpoints/
+*.pth
+*.pt
+runs/
+wandb/
+*.log
+
+# Misc
+*.bak
+*.tmp

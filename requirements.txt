@@ -1,0 +1,7 @@
+torch>=1.13
+numpy>=1.21
+scipy>=1.7
+pyyaml>=6.0
+tqdm>=4.60
+mne>=1.0
+tensorboard>=2.10

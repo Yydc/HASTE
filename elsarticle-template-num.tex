@@ -1,0 +1,1482 @@
+
+\documentclass[preprint,12pt]{elsarticle}
+\usepackage{multirow}
+\usepackage[table]{xcolor} 
+\usepackage[normalem]{ulem}
+\usepackage{colortbl}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{booktabs}
+\usepackage{bm}
+\usepackage{algorithm}
+\newcommand{\abcell}[2]{\shortstack[r]{#1\\[-1pt]{\scriptsize(#2)}}}
+\makeatletter
+\AtBeginDocument{\DeclareMathVersion{bold}
+\SetSymbolFont{operators}{bold}{T1}{times}{b}{n}
+\DeclareSymbolFont{NewLetters}{T1}{cmr}{m}{it}
+\SetSymbolFont{NewLetters}{bold}{T1}{times}{b}{it}
+\SetMathAlphabet{\mathrm}{bold}{T1}{times}{b}{n}
+\SetMathAlphabet{\mathit}{bold}{T1}{times}{b}{it}
+\SetMathAlphabet{\mathbf}{bold}{T1}{times}{b}{n}
+\SetMathAlphabet{\mathtt}{bold}{OT1}{pcr}{b}{n}
+\SetSymbolFont{symbols}{bold}{OMS}{cmsy}{b}{n}
+\renewcommand\boldmath{\@nomath\boldmath\mathversion{bold}}}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+\newtheorem{proof}{Proof}
+\newtheorem{corollary}{Corollary}
+\newcommand{\OurPCC}{0.XXX}
+\newcommand{\OurRMSE}{XX.XX} % in %
+\newcommand{\OurMAE}{XX.XX}  % in %
+\newcommand{\OurLatency}{XX.X} % ms per update in streaming mode (step-wise)
+
+\journal{Knowledge-Based Systems}
+
+\begin{document}
+
+\begin{frontmatter}
+
+%% Title, authors and addresses
+
+%% use the tnoteref command within \title for footnotes;
+%% use the tnotetext command for theassociated footnote;
+%% use the fnref command within \author or \affiliation for footnotes;
+%% use the fntext command for theassociated footnote;
+%% use the corref command within \author for corresponding author footnotes;
+%% use the cortext command for theassociated footnote;
+%% use the ead command for the email address,
+%% and the form \ead[url] for the home page:
+%% \title{Title\tnoteref{label1}}
+%% \tnotetext[label1]{}
+%% \author{Name\corref{cor1}\fnref{label2}}
+%% \ead{email address}
+%% \ead[url]{home page}
+%% \fntext[label2]{}
+%% \cortext[cor1]{}
+%% \affiliation{organization={},
+%%             addressline={},
+%%             city={},
+%%             postcode={},
+%%             state={},
+%%             country={}}
+%% \fntext[label3]{}
+
+\title{From Electrode Geometry to Adaptive Coupling: HASTE for Streaming EEG Fatigue Monitoring}
+
+
+\author{Qiyu Niu}
+\affiliation{organization={Academy for Engineering and Technology, Fudan University},
+            city={Shanghai},
+            postcode={200433},
+            country={China}}
+
+\affiliation{organization={Institute of Science and Technology for Brain-Inspired Intelligence, Fudan University},
+            city={Shanghai},
+            postcode={200433},
+            country={China}}
+
+\author{Yi Xie}
+\affiliation{organization={Department of Electrical \& Computer Engineering, University of Arizona},
+            city={Tucson},
+            postcode={85721},
+            state={Arizona},
+            country={USA}}
+
+\author{Siao Liu}
+\affiliation{organization={Future Science and Engineering College, Soochow University},
+            city={Suzhou},
+            postcode={215006},
+            state={Jiangsu},
+            country={China}}
+
+\author{Shouyan Wang*}
+\affiliation{organization={Academy for Engineering and Technology, Fudan University},
+            city={Shanghai},
+            postcode={200433},
+            country={China}}
+
+\affiliation{organization={Institute of Science and Technology for Brain-Inspired Intelligence, Fudan University},
+            city={Shanghai},
+            postcode={200433},
+            country={China}}
+
+\author{Yingnan Nie*}
+\affiliation{organization={Institute of Science and Technology for Brain-Inspired Intelligence, Fudan University},
+            city={Shanghai},
+            postcode={200433},
+            country={China}}
+
+\affiliation{organization={School of Rehabilitation Sciences and Engineering, University of Health and Rehabilitation Sciences},
+            city={Qingdao},
+            postcode={266113},
+            state={Shandong},
+            country={China}}
+
+\affiliation{country={*Corresponding authors}}            
+
+\begin{abstract}
+Streaming EEG fatigue monitoring is challenging because fatigue signatures are both frequency-dependent and spatially distributed across electrodes, while deployment requires strictly causal updates with bounded latency and memory. Existing Transformers weakly exploit electrode geometry and incur history-dependent cost, whereas graph models typically rely on fixed or unconstrained connectivity that is difficult to adapt as cognitive state changes. We propose HASTE, a hybrid-attention streaming topology-aware estimator that separates where interactions are allowed from how strongly they adapt: a physical $k$NN graph constrains spatial attention to anatomically feasible neighborhoods, and an online band-aware functional prior biases within-neighborhood attention through an additive log-bias. Causal spectral fusion tracks time-varying band relevance, and causal local temporal attention with a fixed look-back window enables constant-memory inference with respect to session length. Under leave-one-subject-out streaming evaluation on SEED-VIG, SADT, and MPD-DF, HASTE consistently outperforms six baselines, achieving PCCs of 0.827, 0.751, and 0.714, respectively, with ${\sim}$2.8\,ms per update and ${\sim}$47\,MB GPU memory on a single GPU.
+\end{abstract}
+
+\begin{highlights}
+\item A physical $k$NN graph constrains spatial attention to anatomically feasible neighborhoods.
+\item Band-aware functional priors bias spatial attention through a tunable additive log-bias.
+\item Causal spectral fusion tracks time-varying band relevance and mixes band-specific priors online.
+\item Causal local temporal attention with a fixed look-back window enables constant-memory inference.
+\item HASTE improves LOSO streaming fatigue regression on SEED-VIG, SADT, and MPD-DF.
+\end{highlights}
+
+\begin{keyword}
+EEG \sep fatigue monitoring \sep streaming inference \sep
+topology-aware attention
+\end{keyword}
+\end{frontmatter}
+
+
+\section{Introduction}
+\label{sec:intro}
+
+Fatigue monitoring is critical in safety-sensitive settings such as prolonged driving and industrial operation, where performance degradation can accumulate before it becomes apparent \cite{Williamson2011FatigueSafety,Sikander2019DriverFatigueReview}. 
+A deployable monitor must therefore update strictly causally in real time, with bounded per-step latency and memory that does not grow with session length.
+
+EEG is well suited to this problem because fatigue-related activity exhibits two coupled structures: frequency-dependent rhythms and state-varying inter-electrode coupling \cite{Lal2001DriverFatigue,Eoh2005DrowsinessEEG}. 
+Continuous supervision is often available through surrogate measures such as PERCLOS or reaction-time-derived fatigue indices \cite{Dinges1998PERCLOS,Zheng2017CriticalBands,cao2019multi,Li2026MPDDF}. 
+We consider the subject-independent streaming regression setting: at time step $t$, the model receives the current window of multi-band EEG features from $C$ electrodes and predicts a continuous fatigue score using only observations up to $t$. 
+Throughout, causal refers to the model update given window-level features; the same requirement can be imposed on feature extraction in deployment.
+
+However, existing architectures do not fit this setting well. 
+First, Transformers usually model EEG as a generic token sequence and often weakly exploit electrode geometry. 
+Second, their temporal cost grows with history length unless additional constraints are imposed \cite{vaswani2017attention,Beltagy2020Longformer}. 
+Third, graph-based models incorporate spatial structure, but they typically rely on fixed connectivity or dense learned interactions, making state-varying coupling hard to adapt and hard to control \cite{kipf2016semi,velivckovic2017graph}. 
+The central question is therefore whether a streaming EEG model can remain band-aware and state-adaptive while respecting electrode geometry and bounded deployment cost.
+
+To answer this question, we propose \textit{HASTE}, a \textit{H}ybrid-\textit{A}ttention \textit{S}treaming \textit{T}opology-aware \textit{E}stimator. 
+HASTE first builds a sparse physical graph from electrode locations and restricts spatial attention to a $k$NN neighborhood, so information exchange remains anatomically plausible \cite{Klem1999TenTwenty}. 
+Within this feasible set, it computes a row-stochastic functional coupling prior online and injects it into the attention logits as an additive log-bias, making the effect of prior knowledge explicit and tunable. 
+To follow time-varying spectral relevance, HASTE includes a causal spectral fusion module that maintains a recurrent state and mixes band-specific priors online \cite{Cho2014GRU}. 
+For temporal modeling, it uses causal local attention with a fixed look-back window and a key--value cache, enabling bounded-latency, constant-memory inference with respect to session length \cite{dai2019transformer,Beltagy2020Longformer}. 
+Figure\ref{figure1} summarizes the streaming setting, the main HASTE modules, and the interpretable outputs exposed by the model, including the band weights $\boldsymbol{\alpha}_t$, the prior-mixing gate $g_t$, and stage-dependent spatial salience patterns.
+
+\begin{figure*}[!t]
+\centering
+\label{figure1}
+\includegraphics[width=0.98\linewidth]{Figure1.pdf}
+\caption{High-level overview of HASTE in the streaming EEG fatigue monitoring setting. (A) Each update uses the current multi-band EEG window together with the electrode montage. (B) The model combines causal spectral fusion, knowledge-guided spatial attention, and causal local temporal attention. (C) HASTE outputs a fatigue estimate and exposes interpretable signals, including band weights $\boldsymbol{\alpha}_t$, the prior-mixing gate $g_t$, and stage-dependent spatial salience patterns.}
+\end{figure*}
+
+We evaluate HASTE under a unified leave-one-subject-out streaming pipeline on SEED-VIG, SADT, and MPD-DF \cite{Zheng2017CriticalBands,cao2019multi,Li2026MPDDF}. 
+Beyond regression accuracy, we profile per-update latency and peak GPU memory as session length grows, and perform ablations and interpretability analyses to isolate the contribution of each mechanism. 
+Across all three datasets, HASTE consistently improves over strong baselines while retaining millisecond-level update time and constant-memory behavior with respect to session length.
+
+In summary, our contributions are fourfold:
+\begin{itemize}
+\item We formulate streaming EEG spatial modeling for subject-independent fatigue regression as a constrained problem, and show that topology-constrained stochastic priors with additive log-bias attention provide explicit prior control and stability under prior drift.
+
+\item Based on this formulation, we develop a knowledge-guided spatial design that combines a physical $k$NN graph, band-aware functional priors, and anatomical--functional prior fusion for adaptive yet anatomically feasible coupling.
+
+\item We propose HASTE, which instantiates this design in a hybrid-attention spatio-temporal architecture with causal spectral fusion, prior-biased spatial attention, and bounded causal local temporal attention for constant-memory streaming inference.
+
+\item We establish a unified LOSO streaming evaluation on SEED-VIG, SADT, and MPD-DF, showing that HASTE consistently outperforms strong baselines while retaining predictable deployment cost.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related_work}
+
+Our work is most closely related to three research directions: continuous EEG-based fatigue and vigilance estimation, topology-aware spatio-temporal EEG modeling, and efficient causal sequence modeling for streaming inference.
+
+\subsection{Continuous EEG-Based Fatigue and Vigilance Estimation}
+
+Fatigue monitoring has long been studied in safety-critical scenarios such as driving and transportation, and prior surveys summarize sensing modalities, fatigue proxies, and algorithmic pipelines \cite{Sikander2019DriverFatigueReview,Williamson2011FatigueSafety}. 
+Among physiological signals, EEG is particularly attractive because fatigue-related changes are reflected in vigilance-related spectral activity and cortical dynamics \cite{Lal2001DriverFatigue,Eoh2005DrowsinessEEG}. 
+A practical difficulty is that fatigue evolves continuously rather than switching cleanly between a few discrete states. 
+Accordingly, continuous supervision has been introduced through ocular or behavioral proxies. 
+PERCLOS is one of the most established continuous alertness measures \cite{Dinges1998PERCLOS}, and early multimodal vigilance estimation work already formulated EEG-based monitoring as a continuous regression problem rather than a pure classification task \cite{Zheng2017CriticalBands}. 
+Public benchmarks reinforce this setting: SEED-VIG provides continuous vigilance targets, SADT offers sustained-attention driving EEG with reaction-time events that can be mapped to continuous indices, and MPD-DF further extends subject scale, signal modalities, and physician-annotated fatigue labels \cite{Zheng2017CriticalBands,cao2019multi,Li2026MPDDF}. 
+Recent work has also begun to explore cross-dataset fatigue regression \cite{Yuan2023CrossDatasetFatigue}. 
+Nevertheless, explicit streaming requirements---strict causality, bounded per-step latency, and memory that does not grow with session length---remain secondary in most of this literature.
+
+\subsection{Topology-Aware Spatio-Temporal EEG Modeling}
+
+Deep EEG representation learning has progressed from compact and deep convolutional models to recurrent sequential models \cite{Roy2019DeepLearningEEGReview,Lawhern2018EEGNet,Schirrmeister2017DeepConvNets,Hochreiter1997LSTM}. 
+More recently, Transformer-style EEG architectures have been explored to capture broader temporal dependencies and global feature interactions \cite{vaswani2017attention,song2023eeg}. 
+These studies show the value of attention for EEG modeling, but spatial relations are typically handled through convolutions or unrestricted attention rather than an explicit topology-constrained interaction graph. 
+
+In parallel, graph neural networks provide a natural framework for topology-aware EEG modeling. 
+Foundational graph models such as GCN and GAT establish neighborhood aggregation and attention-based message passing on graphs \cite{kipf2016semi,velivckovic2017graph}, and EEG-specific dynamic graph constructions such as DGCNN demonstrate the value of adaptive connectivity \cite{Song2018DGCNN}. 
+This literature reveals a core trade-off: fixed topology promotes anatomical plausibility and stability, whereas fully learned connectivity offers flexibility but can become dense, opaque, and difficult to control. 
+HASTE is designed around this trade-off by separating a sparse physical feasible set from online functional modulation within that set.
+
+\subsection{Efficient Causal Sequence Modeling for Streaming Inference}
+
+Transformers are appealing for long-range temporal modeling, but vanilla self-attention has computation and memory costs that grow with history length \cite{vaswani2017attention}. 
+Efficient long-context variants address this bottleneck from complementary angles. 
+Transformer-XL introduces segment-level recurrence and cached states to extend effective context \cite{dai2019transformer}, while Longformer restricts attention to local or sparse patterns to improve long-sequence efficiency \cite{Beltagy2020Longformer}. 
+These designs are well aligned with streaming deployment, but they are not tailored to EEG fatigue monitoring, where efficient causal temporal reasoning must be coupled with band-aware and topology-constrained spatial modeling. 
+Our model builds on this efficient-attention perspective, but integrates it with an explicit physical-graph spatial mechanism and online functional priors for continuous EEG fatigue regression.
+\section{Knowledge-Guided Spatial Design and Analysis}
+\label{sec:theory}
+
+The preceding discussion suggests that streaming EEG fatigue estimation requires a spatial mechanism that is band-aware, anatomically feasible, stable under online adaptation, and explicitly controllable. We formalize these requirements below.
+
+At each time step $t$, the model receives a multi-band window
+$\mathbf{X}_t\in\mathbb{R}^{C\times B}$ and must output a fatigue estimate using only observations up to time $t$.
+This setting imposes four constraints on spatial modeling:
+the model should remain band-aware as spectral relevance changes over time,
+electrode interactions should be anatomically feasible rather than fully dense,
+online adaptation should be stable and inspectable to avoid brittle streaming behavior,
+and the influence of any spatial prior on attention should be explicit and tunable.
+
+HASTE addresses these requirements with a two-tier design:
+a fixed physical graph defines a hard feasible set of spatial interactions,
+and a time-varying row-stochastic prior defines a soft, state-dependent preference within that feasible set.
+The prior is then injected into neighborhood attention as an explicit logit bias, so its influence is both tunable and transparent.
+
+\subsection{Feasible Neighborhoods and a Graph-Constrained Stochastic Prior}
+\label{sec:theory_formulation}
+
+\paragraph{Physical feasibility via a $k$NN electrode graph.}
+We encode electrode geometry as a physical graph
+$\mathcal{G}^{\mathrm{phy}}=(\mathcal{V},\mathcal{E}^{\mathrm{phy}})$, where $\mathcal{V}$ is the electrode set and
+$\mathcal{E}^{\mathrm{phy}}$ connects physically adjacent electrodes (e.g., consistent with standardized montages such as 10--20~\cite{Klem1999TenTwenty}).
+For node $i\in\mathcal{V}$, its feasible neighbor set is
+$\mathcal{N}(i)=\{j:(i,j)\in\mathcal{E}^{\mathrm{phy}}\}$.
+Let $\mathbf{h}_{i,t}$ denote a learnable representation of electrode $i$ before spatial aggregation at time $t$.
+We restrict aggregation to the feasible set:
+\begin{equation}
+\tilde{\mathbf{h}}_{i,t}
+=
+\sum_{j\in\mathcal{N}(i)}\pi_{ij,t}\,\mathbf{h}_{j,t},
+\qquad
+\pi_{ij,t}\ge 0,\quad
+\sum_{j\in\mathcal{N}(i)}\pi_{ij,t}=1.
+\label{eq:neighbor_agg}
+\end{equation}
+Eq.~\eqref{eq:neighbor_agg} enforces a controllable, sparse spatial receptive field and prevents anatomically implausible mixing.
+The remaining question is how to choose $\{\pi_{ij,t}\}$ so that coupling adapts with fatigue state while remaining stable over time.
+
+\paragraph{A row-stochastic coupling prior on the physical graph.}
+We encode spatial knowledge at time $t$ as a row-stochastic matrix
+$\mathbf{P}_t\in\mathbb{R}^{C\times C}$ supported on $\mathcal{E}^{\mathrm{phy}}$:
+\begin{equation}
+P_{ij,t}\ge 0,\qquad
+\sum_{j=1}^{C}P_{ij,t}=1,\qquad
+P_{ij,t}=0\ \text{if } (i,j)\notin\mathcal{E}^{\mathrm{phy}}.
+\label{eq:prior_stochastic}
+\end{equation}
+Each row of $\mathbf{P}_t$ is a probability distribution over $\mathcal{N}(i)$.
+Equivalently, $\mathbf{P}_t$ is a Markov transition kernel on $\mathcal{G}^{\mathrm{phy}}$:
+$P_{ij,t}$ describes how strongly node $i$ prefers to route information to neighbor $j$ at time $t$.
+We do not force features to diffuse according to $\mathbf{P}_t$; instead, we inject it as a bias into attention (Section~\ref{sec:theory_attention}).
+
+\paragraph{Two-tier knowledge: anatomy as a stable baseline, function as adaptive preference.}
+We construct $\mathbf{P}_t$ by mixing a static anatomical prior and a dynamic functional prior.
+Let $\mathbf{P}^{\mathrm{phy}}$ be a fixed row-stochastic prior supported on $\mathcal{E}^{\mathrm{phy}}$ (geometry-driven baseline).
+Let $\mathbf{P}^{\mathrm{func}}_{t,b}$ denote a band-specific functional prior at time $t$ for band $b\in\{1,\ldots,B\}$,
+also row-stochastic on $\mathcal{E}^{\mathrm{phy}}$.
+Because fatigue effects are frequency-dependent, we fuse band priors using band relevance weights
+$\boldsymbol{\alpha}_t=[\alpha_{t,1},\ldots,\alpha_{t,B}]^\top$ with $\alpha_{t,b}\ge 0$ and $\sum_{b=1}^{B}\alpha_{t,b}=1$:
+\begin{equation}
+\mathbf{P}^{\mathrm{func}}_t
+=
+\sum_{b=1}^{B}\alpha_{t,b}\mathbf{P}^{\mathrm{func}}_{t,b}.
+\label{eq:spectral_fusion}
+\end{equation}
+We then combine anatomical stability and functional adaptivity with a prior-mixing gate $g_t\in[0,1]$:
+\begin{equation}
+\mathbf{P}_t
+=
+g_t\mathbf{P}^{\mathrm{phy}} + (1-g_t)\mathbf{P}^{\mathrm{func}}_t.
+\label{eq:gate_fusion}
+\end{equation}
+Here $g_t$ explicitly controls the balance between anatomy and function:
+larger $g_t$ places more weight on $\mathbf{P}^{\mathrm{phy}}$,
+whereas smaller $g_t$ allows stronger functional influence.
+Since all components are row-stochastic and share the same support, $\mathbf{P}_t$ again satisfies Eq.~\eqref{eq:prior_stochastic}.
+Indeed, for any row $i$,
+\[
+\sum_{j=1}^{C}P_{ij,t}
+=
+g_t\sum_{j=1}^{C}P^{\mathrm{phy}}_{ij}
++
+(1-g_t)\sum_{j=1}^{C}P^{\mathrm{func}}_{ij,t}
+=
+g_t+(1-g_t)
+=
+1,
+\]
+and $P_{ij,t}=0$ whenever $(i,j)\notin\mathcal{E}^{\mathrm{phy}}$ because both
+$\mathbf{P}^{\mathrm{phy}}$ and $\mathbf{P}^{\mathrm{func}}_t$ vanish outside the same physical support.
+Hence $\mathbf{P}_t$ remains a valid row-stochastic prior on $\mathcal{G}^{\mathrm{phy}}$.
+To encourage stable streaming behavior, we later regularize temporal drift of $\mathbf{P}^{\mathrm{func}}_t$ and $g_t$
+with $\mathcal{L}_{\mathrm{graph}}$ (Eq.~\eqref{eq:L_graph}).
+
+\subsection{Prior-Biased Attention: Monotonic Control and Drift Stability}
+\label{sec:theory_attention}
+
+We convert the prior into an explicit attention bias so that knowledge influence is controllable and inspectable.
+For each feasible edge $(i,j)$ with $j\in\mathcal{N}(i)$, let $\tilde{\ell}_{ij,t}$ be a learnable data-driven affinity score.
+We define the biased logit
+\begin{equation}
+\ell_{ij,t}
+=
+\tilde{\ell}_{ij,t}
++
+\beta \log(P_{ij,t}+\epsilon),
+\qquad j\in\mathcal{N}(i),
+\label{eq:biased_attention}
+\end{equation}
+where $\beta>0$ controls prior strength and $\epsilon>0$ ensures numerical stability.
+Neighborhood softmax yields attention weights
+\begin{equation}
+\pi_{ij,t}
+=
+\frac{\exp(\ell_{ij,t})}{\sum_{k\in\mathcal{N}(i)}\exp(\ell_{ik,t})},
+\qquad j\in\mathcal{N}(i).
+\label{eq:attention_weights}
+\end{equation}
+Feasibility is guaranteed because attention is computed only over $\mathcal{N}(i)$.
+Adaptivity arises because $\mathbf{P}_t$ changes with time and band relevance.
+Inspectability follows because $\boldsymbol{\alpha}_t$, $g_t$, and $\mathbf{P}_t$ can be examined directly at inference time.
+
+\begin{proposition}[Posterior form of prior-biased attention]
+\label{prop:posterior_form}
+Fix node $i$ and time $t$.
+Under Eqs.~\eqref{eq:biased_attention}--\eqref{eq:attention_weights},
+\begin{equation}
+\pi_{ij,t}
+=
+\frac{\exp(\tilde{\ell}_{ij,t})\,(P_{ij,t}+\epsilon)^{\beta}}
+{\sum_{k\in\mathcal{N}(i)}\exp(\tilde{\ell}_{ik,t})\,(P_{ik,t}+\epsilon)^{\beta}},
+\qquad j\in\mathcal{N}(i).
+\label{eq:posterior_form}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+For fixed node $i$ and time $t$, substitute Eq.~\eqref{eq:biased_attention} into the numerator of Eq.~\eqref{eq:attention_weights}:
+\[
+\exp(\ell_{ij,t})
+=
+\exp\!\bigl(\tilde{\ell}_{ij,t}+\beta\log(P_{ij,t}+\epsilon)\bigr)
+=
+\exp(\tilde{\ell}_{ij,t})\,\exp\!\bigl(\beta\log(P_{ij,t}+\epsilon)\bigr).
+\]
+Using $\exp(\beta\log x)=x^\beta$ for $x>0$, we obtain
+\[
+\exp(\ell_{ij,t})
+=
+\exp(\tilde{\ell}_{ij,t})(P_{ij,t}+\epsilon)^\beta .
+\]
+Applying the same expansion to every feasible neighbor $k\in\mathcal{N}(i)$, the normalization term becomes
+\[
+\sum_{k\in\mathcal{N}(i)}\exp(\ell_{ik,t})
+=
+\sum_{k\in\mathcal{N}(i)}
+\exp(\tilde{\ell}_{ik,t})(P_{ik,t}+\epsilon)^\beta.
+\]
+Substituting these expressions back into Eq.~\eqref{eq:attention_weights} yields
+\[
+\pi_{ij,t}
+=
+\frac{\exp(\tilde{\ell}_{ij,t})(P_{ij,t}+\epsilon)^\beta}
+{\sum_{k\in\mathcal{N}(i)}\exp(\tilde{\ell}_{ik,t})(P_{ik,t}+\epsilon)^\beta},
+\qquad j\in\mathcal{N}(i),
+\]
+which is exactly Eq.~\eqref{eq:posterior_form}. Note that $\epsilon>0$ ensures every term is finite and positive, so the neighborhood softmax is well defined even when some prior entries are zero.
+\end{proof}
+
+Eq.~\eqref{eq:posterior_form} shows that attention is a normalized product of a data-driven score and a graph prior,
+with $\beta$ acting as a direct control knob.
+The prior influence is monotonic at the logit level:
+\begin{equation}
+\frac{\partial \ell_{ij,t}}{\partial P_{ij,t}}
+=
+\frac{\beta}{P_{ij,t}+\epsilon}
+>
+0.
+\label{eq:monotonic}
+\end{equation}
+Moreover, holding $\{\tilde{\ell}_{ik,t}\}_{k\in\mathcal{N}(i)}$ and all other prior entries fixed, the induced attention change is also monotonic:
+\[
+\frac{\partial \pi_{ij,t}}{\partial P_{ij,t}}
+=
+\pi_{ij,t}(1-\pi_{ij,t})\,\frac{\beta}{P_{ij,t}+\epsilon}
+>
+0,
+\qquad
+\frac{\partial \pi_{ik,t}}{\partial P_{ij,t}}
+=
+-\pi_{ik,t}\pi_{ij,t}\,\frac{\beta}{P_{ij,t}+\epsilon}
+<
+0
+\quad (k\neq j).
+\]
+Thus increasing the prior weight on one feasible edge increases its own attention share and decreases the competing shares of the remaining neighbors.
+
+\begin{proposition}[Stability under prior drift]
+\label{prop:stability}
+Fix node $i$ and time $t$, and hold $\{\tilde{\ell}_{ij,t}\}_{j\in\mathcal{N}(i)}$ constant.
+Consider two priors $\mathbf{P}_t$ and $\mathbf{P}'_t$ with corresponding neighborhood attention distributions
+$\boldsymbol{\pi}_{i,t}$ and $\boldsymbol{\pi}'_{i,t}$ on $\mathcal{N}(i)$.
+Let $\mathbf{p}_{i,t}$ and $\mathbf{p}'_{i,t}$ be the $i$-th rows restricted to $\mathcal{N}(i)$.
+Then
+\begin{equation}
+\|\boldsymbol{\pi}_{i,t}-\boldsymbol{\pi}'_{i,t}\|_2
+\le
+\frac{\beta}{2\epsilon}\,\|\mathbf{p}_{i,t}-\mathbf{p}'_{i,t}\|_2.
+\label{eq:stability_bound}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Restrict attention to the neighborhood $\mathcal{N}(i)$ and define
+\[
+\mathbf{u}
+=
+\tilde{\boldsymbol{\ell}}_{i,t}
++
+\mathbf{b}(\mathbf{p}_{i,t}),
+\qquad
+\mathbf{v}
+=
+\tilde{\boldsymbol{\ell}}_{i,t}
++
+\mathbf{b}(\mathbf{p}'_{i,t}),
+\]
+where
+\[
+\mathbf{b}(\mathbf{p})
+=
+\beta\log(\mathbf{p}+\epsilon\mathbf{1})
+\]
+is applied elementwise and
+$\tilde{\boldsymbol{\ell}}_{i,t}=[\tilde{\ell}_{ij,t}]_{j\in\mathcal{N}(i)}$.
+Then
+\[
+\boldsymbol{\pi}_{i,t}=\mathrm{softmax}(\mathbf{u}),
+\qquad
+\boldsymbol{\pi}'_{i,t}=\mathrm{softmax}(\mathbf{v}).
+\]
+
+We first bound the perturbation of the bias term.
+For each coordinate $j\in\mathcal{N}(i)$, the scalar function
+$f(x)=\beta\log(x+\epsilon)$ has derivative
+\[
+f'(x)=\frac{\beta}{x+\epsilon},
+\qquad x\ge 0.
+\]
+Since $x+\epsilon\ge\epsilon$, we have $|f'(x)|\le \beta/\epsilon$ for all $x\ge 0$.
+By the mean value theorem,
+\[
+\bigl|\beta\log(p_{ij,t}+\epsilon)-\beta\log(p'_{ij,t}+\epsilon)\bigr|
+\le
+\frac{\beta}{\epsilon}\,|p_{ij,t}-p'_{ij,t}|.
+\]
+Applying this coordinatewise and summing yields
+\begin{equation}
+\|\mathbf{b}(\mathbf{p}_{i,t})-\mathbf{b}(\mathbf{p}'_{i,t})\|_2
+\le
+\frac{\beta}{\epsilon}\,
+\|\mathbf{p}_{i,t}-\mathbf{p}'_{i,t}\|_2.
+\label{eq:bias_lipschitz}
+\end{equation}
+
+We next bound the softmax map.
+Let $\sigma(\cdot)$ denote softmax over $\mathcal{N}(i)$.
+Its Jacobian at a point $\mathbf{z}$ is
+\[
+\mathbf{J}(\mathbf{z})
+=
+\mathrm{diag}(\sigma(\mathbf{z}))
+-
+\sigma(\mathbf{z})\sigma(\mathbf{z})^\top.
+\]
+Write $\boldsymbol{\rho}=\sigma(\mathbf{z})$.
+For row $r$, the absolute row sum is
+\[
+\sum_{k}|J_{rk}|
+=
+\rho_r(1-\rho_r)+\sum_{k\neq r}\rho_r\rho_k
+=
+2\rho_r(1-\rho_r)
+\le
+\frac{1}{2},
+\]
+because $\rho_r(1-\rho_r)\le 1/4$.
+Hence
+\[
+\|\mathbf{J}(\mathbf{z})\|_\infty \le \frac{1}{2}.
+\]
+Since $\mathbf{J}(\mathbf{z})$ is symmetric, $\|\mathbf{J}(\mathbf{z})\|_1=\|\mathbf{J}(\mathbf{z})\|_\infty$, and therefore
+\[
+\|\mathbf{J}(\mathbf{z})\|_2
+\le
+\sqrt{\|\mathbf{J}(\mathbf{z})\|_1\|\mathbf{J}(\mathbf{z})\|_\infty}
+\le
+\frac{1}{2}.
+\]
+Using the integral form of the mean value theorem,
+\[
+\sigma(\mathbf{u})-\sigma(\mathbf{v})
+=
+\int_0^1
+\mathbf{J}\!\bigl(\mathbf{v}+\tau(\mathbf{u}-\mathbf{v})\bigr)
+(\mathbf{u}-\mathbf{v})\,d\tau .
+\]
+Taking $\ell_2$ norms and using the uniform Jacobian bound gives
+\begin{equation}
+\|\mathrm{softmax}(\mathbf{u})-\mathrm{softmax}(\mathbf{v})\|_2
+\le
+\frac{1}{2}\|\mathbf{u}-\mathbf{v}\|_2 .
+\label{eq:softmax_lipschitz}
+\end{equation}
+
+Finally, $\tilde{\boldsymbol{\ell}}_{i,t}$ is held fixed, so
+\[
+\mathbf{u}-\mathbf{v}
+=
+\mathbf{b}(\mathbf{p}_{i,t})-\mathbf{b}(\mathbf{p}'_{i,t}).
+\]
+Combining Eqs.~\eqref{eq:bias_lipschitz} and \eqref{eq:softmax_lipschitz}, we obtain
+\[
+\|\boldsymbol{\pi}_{i,t}-\boldsymbol{\pi}'_{i,t}\|_2
+\le
+\frac{1}{2}
+\|\mathbf{b}(\mathbf{p}_{i,t})-\mathbf{b}(\mathbf{p}'_{i,t})\|_2
+\le
+\frac{\beta}{2\epsilon}\,
+\|\mathbf{p}_{i,t}-\mathbf{p}'_{i,t}\|_2,
+\]
+which is Eq.~\eqref{eq:stability_bound}.
+\end{proof}
+
+Proposition~\ref{prop:stability} turns the streaming stability requirement into a concrete design target:
+controlling the drift of $\mathbf{P}_t$ directly controls the prior-induced perturbation of neighborhood attention.
+This motivates regularizing temporal drift of $\mathbf{P}^{\mathrm{func}}_t$ and $g_t$ during training (Eq.~\eqref{eq:L_graph}).
+
+\begin{lemma}[Gate-induced drift decomposition]
+\label{lem:gate_drift}
+For $\mathbf{P}_t$ in Eq.~\eqref{eq:gate_fusion},
+\begin{equation}
+\mathbf{P}_t-\mathbf{P}_{t-1}
+=
+(g_t-g_{t-1})(\mathbf{P}^{\mathrm{phy}}-\mathbf{P}^{\mathrm{func}}_{t-1})
++
+(1-g_t)(\mathbf{P}^{\mathrm{func}}_{t}-\mathbf{P}^{\mathrm{func}}_{t-1}).
+\label{eq:gate_drift}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Starting from Eq.~\eqref{eq:gate_fusion},
+\[
+\mathbf{P}_t
+=
+g_t\mathbf{P}^{\mathrm{phy}}+(1-g_t)\mathbf{P}^{\mathrm{func}}_t,
+\qquad
+\mathbf{P}_{t-1}
+=
+g_{t-1}\mathbf{P}^{\mathrm{phy}}+(1-g_{t-1})\mathbf{P}^{\mathrm{func}}_{t-1}.
+\]
+Subtracting the two expressions gives
+\[
+\mathbf{P}_t-\mathbf{P}_{t-1}
+=
+(g_t-g_{t-1})\mathbf{P}^{\mathrm{phy}}
++
+(1-g_t)\mathbf{P}^{\mathrm{func}}_t
+-
+(1-g_{t-1})\mathbf{P}^{\mathrm{func}}_{t-1}.
+\]
+To separate gate variation from functional-prior variation, add and subtract
+$(1-g_t)\mathbf{P}^{\mathrm{func}}_{t-1}$:
+\[
+\mathbf{P}_t-\mathbf{P}_{t-1}
+=
+(g_t-g_{t-1})\mathbf{P}^{\mathrm{phy}}
++
+(1-g_t)\mathbf{P}^{\mathrm{func}}_t
+-
+(1-g_t)\mathbf{P}^{\mathrm{func}}_{t-1}
++
+(1-g_t)\mathbf{P}^{\mathrm{func}}_{t-1}
+-
+(1-g_{t-1})\mathbf{P}^{\mathrm{func}}_{t-1}.
+\]
+Grouping terms yields
+\[
+\mathbf{P}_t-\mathbf{P}_{t-1}
+=
+(g_t-g_{t-1})\bigl(\mathbf{P}^{\mathrm{phy}}-\mathbf{P}^{\mathrm{func}}_{t-1}\bigr)
++
+(1-g_t)\bigl(\mathbf{P}^{\mathrm{func}}_{t}-\mathbf{P}^{\mathrm{func}}_{t-1}\bigr),
+\]
+which is Eq.~\eqref{eq:gate_drift}.
+\end{proof}
+
+Eq.~\eqref{eq:gate_drift} separates two sources of change:
+the first term measures how the model shifts its balance between anatomical and functional priors (gate drift),
+and the second term measures how quickly the functional prior itself evolves,
+weighted by the current functional contribution $(1-g_t)$.
+
+\begin{corollary}[Gate-aware bound on prior-induced attention perturbation]
+\label{cor:attention_drift}
+Fix a node $i$ and a data-driven affinity vector
+$\tilde{\boldsymbol{\ell}}_{i}=[\tilde{\ell}_{ij}]_{j\in\mathcal{N}(i)}$.
+Let $\boldsymbol{\pi}_{i}(\mathbf{P})$ denote the neighborhood attention distribution produced by
+Eqs.~\eqref{eq:biased_attention}--\eqref{eq:attention_weights} when the prior row is taken from $\mathbf{P}$ and $\tilde{\boldsymbol{\ell}}_{i}$ is held fixed.
+For two consecutive priors $\mathbf{P}_{t-1}$ and $\mathbf{P}_{t}$ defined by Eq.~\eqref{eq:gate_fusion},
+\begin{equation}
+\|\boldsymbol{\pi}_{i}(\mathbf{P}_{t})-\boldsymbol{\pi}_{i}(\mathbf{P}_{t-1})\|_2
+\le
+\frac{\beta}{2\epsilon}
+\left[
+|g_t-g_{t-1}|\,\|\mathbf{p}^{\mathrm{phy}}_{i}-\mathbf{p}^{\mathrm{func}}_{i,t-1}\|_2
++
+(1-g_t)\,\|\mathbf{p}^{\mathrm{func}}_{i,t}-\mathbf{p}^{\mathrm{func}}_{i,t-1}\|_2
+\right],
+\label{eq:attention_drift_decomp}
+\end{equation}
+where
+$\mathbf{p}^{\mathrm{phy}}_{i}=\mathbf{P}^{\mathrm{phy}}(i,\mathcal{N}(i))$
+and
+$\mathbf{p}^{\mathrm{func}}_{i,t}=\mathbf{P}^{\mathrm{func}}_{t}(i,\mathcal{N}(i))$.
+\end{corollary}
+
+\begin{proof}
+Restrict Eq.~\eqref{eq:gate_drift} to row $i$ and to the neighborhood coordinates $\mathcal{N}(i)$.
+This gives
+\[
+\mathbf{p}_{i,t}-\mathbf{p}_{i,t-1}
+=
+(g_t-g_{t-1})(\mathbf{p}^{\mathrm{phy}}_{i}-\mathbf{p}^{\mathrm{func}}_{i,t-1})
++
+(1-g_t)(\mathbf{p}^{\mathrm{func}}_{i,t}-\mathbf{p}^{\mathrm{func}}_{i,t-1}),
+\]
+where $\mathbf{p}_{i,t}=\mathbf{P}_t(i,\mathcal{N}(i))$.
+Applying the triangle inequality yields
+\[
+\|\mathbf{p}_{i,t}-\mathbf{p}_{i,t-1}\|_2
+\le
+|g_t-g_{t-1}|\,\|\mathbf{p}^{\mathrm{phy}}_{i}-\mathbf{p}^{\mathrm{func}}_{i,t-1}\|_2
++
+(1-g_t)\,\|\mathbf{p}^{\mathrm{func}}_{i,t}-\mathbf{p}^{\mathrm{func}}_{i,t-1}\|_2.
+\]
+Now apply Proposition~\ref{prop:stability} with the data-driven affinity vector fixed at $\tilde{\boldsymbol{\ell}}_{i}$ to obtain
+\[
+\|\boldsymbol{\pi}_{i}(\mathbf{P}_{t})-\boldsymbol{\pi}_{i}(\mathbf{P}_{t-1})\|_2
+\le
+\frac{\beta}{2\epsilon}\,
+\|\mathbf{p}_{i,t}-\mathbf{p}_{i,t-1}\|_2.
+\]
+Combining the two inequalities proves Eq.~\eqref{eq:attention_drift_decomp}.
+\end{proof}
+
+Corollary~\ref{cor:attention_drift} makes explicit how the two regularized quantities in $\mathcal{L}_{\mathrm{graph}}$ affect the prior-induced perturbation of attention.
+Suppressing gate drift controls how rapidly the model shifts between anatomical and functional preferences,
+whereas suppressing $\mathbf{P}^{\mathrm{func}}_t-\mathbf{P}^{\mathrm{func}}_{t-1}$ controls how quickly the functional prior itself changes.
+This is precisely why regularizing both terms promotes stable streaming behavior while preserving adaptive spatial coupling.
+\section{Method: HASTE Architecture}
+\label{sec:method}
+
+HASTE instantiates the spatial design above in a causal spatio-temporal architecture for subject-independent continuous fatigue regression. At time step $t$, the model receives one multi-band window $\mathbf{X}_t\in\mathbb{R}^{C\times B}$ and predicts $\hat{y}_t\in[0,1]$ using only observations up to time $t$. Each update has four stages: online construction of a band-aware spatial prior on the physical graph, prior-biased spatial encoding of the current window, bounded causal temporal aggregation, and regression of the current fatigue state. Figure~2 summarizes this pipeline. The upper branch constructs the fused spatial prior through causal spectral fusion, band-wise functional priors, active-band mixing, and anatomical--functional fusion, whereas the lower branch uses the resulting prior for topology-constrained spatial attention, tokenization, causal local temporal attention, and prediction.
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=0.98\linewidth]{Figure2.pdf}
+\caption{Detailed framework of HASTE. The upper branch builds the knowledge prior from the current multi-band window via causal spectral fusion, a physical topology prior, band-wise functional priors, Top-$K$ active-band mixing, and final gate-based prior fusion. The lower branch uses the resulting prior to guide masked spatial attention, tokenization, local temporal attention, and final fatigue regression.}
+\end{figure*}
+
+
+\subsection{Streaming Setup and Persistent States}
+\label{sec:method_setup}
+
+We use $C$ electrodes and $B$ frequency bands for each of $T$ windows.
+Let $\mathbf{X}\in\mathbb{R}^{C\times T\times B}$ be the full input tensor, where $X_{c,t,b}$ is the feature at electrode $c$,
+time $t$, and band $b$.
+At time $t$, the model observes $\mathbf{X}_t\triangleq\mathbf{X}_{:,t,:}\in\mathbb{R}^{C\times B}$.
+Let $y_t\in[0,1]$ be the normalized fatigue label and $\hat{y}_t\in[0,1]$ the prediction.
+The model is causal:
+\begin{equation}
+\hat{y}_t = f(\mathbf{X}_{1:t};\theta).
+\label{eq:causal_prediction}
+\end{equation}
+
+Streaming inference relies on the continuous maintenance of three persistent states. Specifically, the process tracks a spectral state $\mathbf{r}_{t-1}\in\mathbb{R}^{d_r}$ alongside a temporal key-value cache $\mathcal{C}_{t-1}$, which stores the most recent $L-1$ key and value pairs per attention head. Furthermore, the system preserves a static physical graph $\mathcal{G}^{\mathrm{phy}}=(\mathcal{V},\mathcal{E}^{\mathrm{phy}})$ in conjunction with an anatomical prior $\mathbf{P}^{\mathrm{phy}}$.
+
+\subsection{Build the Knowledge Prior Online}
+\label{sec:method_prior}
+
+This block instantiates the band-aware stochastic prior in Section~\ref{sec:theory_formulation} under streaming and compute constraints.
+\paragraph{Causal spectral fusion.}
+We estimate time-varying band relevance weights $\boldsymbol{\alpha}_t\in\mathbb{R}^{B}$.
+We compute a global band descriptor $\mathbf{u}_t\in\mathbb{R}^{B}$ by averaging $\mathbf{X}_t$ over electrodes:
+$u_{t,b}=\frac{1}{C}\sum_{c=1}^{C}X_{c,t,b}$.
+A causal GRU updates the spectral state $\mathbf{r}_t=\mathrm{GRU}(\mathbf{u}_t,\mathbf{r}_{t-1})$~\cite{Cho2014GRU},
+and we compute
+$\boldsymbol{\alpha}_t=\mathrm{Softmax}(\mathbf{W}_s\mathbf{r}_t+\mathbf{b}_s)$.
+We also fuse multi-band features into one scalar per electrode:
+$x_{c,t}=\sum_{b=1}^{B}\alpha_{t,b}X_{c,t,b}$,
+and collect $\mathbf{x}_t=[x_{1,t},\ldots,x_{C,t}]^\top\in\mathbb{R}^{C}$.
+To stabilize streaming behavior, we regularize spectral drift:
+\begin{equation}
+\mathcal{L}_{\mathrm{band}}
+=
+\frac{1}{T-1}\sum_{t=2}^{T}\|\boldsymbol{\alpha}_{t}-\boldsymbol{\alpha}_{t-1}\|_2^2.
+\label{eq:L_band}
+\end{equation}
+
+\paragraph{Band gating for compute-bounded functional priors.}
+Constructing $\mathbf{P}^{\mathrm{func}}_{t,b}$ for all $B$ bands can dominate spatial cost.
+We therefore select an active band set $\mathcal{B}_t$ of size $K$ via $\mathcal{B}_t=\mathrm{TopK}(\boldsymbol{\alpha}_t,K)$.
+Let $m_{t,b}\in\{0,1\}$ indicate whether band $b$ is active.
+We form masked-and-renormalized weights
+\begin{equation}
+\bar{\alpha}_{t,b}
+=
+\frac{m_{t,b}\alpha_{t,b}}{\sum_{b'\in\mathcal{B}_t}\alpha_{t,b'}},
+\qquad
+\sum_{b\in\mathcal{B}_t}\bar{\alpha}_{t,b}=1.
+\label{eq:masked_weights}
+\end{equation}
+Optionally, during training we replace the hard mask with a differentiable approximation
+$\tilde{\mathbf{m}}_t=\mathrm{SOFTTopK}(\boldsymbol{\alpha}_t;K,\tau)\in[0,1]^B$~\cite{xie2020differentiable}
+to reduce train--test mismatch.
+
+\paragraph{Physical graph and anatomical prior.}
+We instantiate the physical graph using a $k$NN rule on electrode coordinates, symmetrize edges, and add self-loops.
+Let $\mathbf{A}^{\mathrm{phy}}\in\{0,1\}^{C\times C}$ be the adjacency.
+The anatomical prior is row-normalized adjacency:
+\begin{equation}
+P^{\mathrm{phy}}_{ij}
+=
+\frac{A^{\mathrm{phy}}_{ij}}{\sum_{k=1}^{C}A^{\mathrm{phy}}_{ik}}.
+\label{eq:phy_norm}
+\end{equation}
+
+\paragraph{Band-wise functional prior (only on active bands).}
+\label{sec:method_func}
+For each electrode $c$ and band $b$, we embed the scalar feature into $\mathbb{R}^{d}$:
+\begin{equation}
+\mathbf{e}_{c,t,b}
+=
+\mathbf{W}^{(e)}_b X_{c,t,b}+\mathbf{b}^{(e)}_b
+\in \mathbb{R}^{d}.
+\label{eq:band_embed}
+\end{equation}
+To reduce compute, we measure similarity in a lower dimension $d_s\ll d$.
+For each feasible edge $(i,j)$ with $j\in\mathcal{N}(i)$:
+\begin{equation}
+s_{ij,t,b}
+=
+\frac{\big(\mathbf{W}_q\mathbf{e}_{i,t,b}\big)^\top\big(\mathbf{W}_k\mathbf{e}_{j,t,b}\big)}{\sqrt{d_s}},
+\qquad
+\mathbf{W}_q,\mathbf{W}_k\in\mathbb{R}^{d_s\times d}.
+\label{eq:similarity_small}
+\end{equation}
+We obtain a row-stochastic prior by neighborhood softmax:
+\begin{equation}
+P^{\mathrm{func}}_{ij,t,b}
+=
+\begin{cases}
+\displaystyle\frac{\exp(s_{ij,t,b})}{\sum_{k\in\mathcal{N}(i)}\exp(s_{ik,t,b})}, & j\in\mathcal{N}(i),\\[6pt]
+0, & \text{otherwise}.
+\end{cases}
+\label{eq:P_func_band}
+\end{equation}
+In streaming inference, we only construct $\mathbf{P}^{\mathrm{func}}_{t,b}$ for $b\in\mathcal{B}_t$.
+\paragraph{Band mixing and prior-mixing gate.}
+We fuse active-band functional priors with masked weights:
+\begin{equation}
+\mathbf{P}^{\mathrm{func}}_t
+=
+\sum_{b\in\mathcal{B}_t}\bar{\alpha}_{t,b}\mathbf{P}^{\mathrm{func}}_{t,b}.
+\label{eq:masked_fusion}
+\end{equation}
+To remain consistent with Top-$K$ computation, we predict the prior-mixing gate using active-band embeddings only:
+\begin{equation}
+\bar{\mathbf{e}}_t
+=
+\frac{1}{C|\mathcal{B}_t|}\sum_{c=1}^{C}\sum_{b\in\mathcal{B}_t}\mathbf{e}_{c,t,b},
+\qquad
+g_t
+=
+\sigma\!\left(\mathbf{w}_g^\top\bar{\mathbf{e}}_t+b_g\right).
+\label{eq:gate}
+\end{equation}
+The final knowledge prior is the convex mix
+\begin{equation}
+\mathbf{P}_t
+=
+g_t\mathbf{P}^{\mathrm{phy}} + (1-g_t)\mathbf{P}^{\mathrm{func}}_t.
+\label{eq:gate_fusion_method}
+\end{equation}
+where larger $g_t$ corresponds to a stronger anatomical contribution,
+and smaller $g_t$ corresponds to a stronger functional contribution.
+
+\subsection{Encode and Predict with Bounded Streaming State}
+\label{sec:method_encode}
+
+\paragraph{Prior-biased spatial attention on the physical graph.}
+We perform graph-restricted multi-head attention (GAT-style)~\cite{velivckovic2017graph}.
+We lift the fused scalar to a node representation
+\begin{equation}
+\mathbf{h}^{(0)}_{i,t}
+=
+\mathbf{w}_{\mathrm{in}} x_{i,t} + \mathbf{b}_{\mathrm{in}}
+\in \mathbb{R}^{d}.
+\label{eq:node_embed}
+\end{equation}
+We parameterize prior strength as $\beta=\log(1+\exp(\tilde{\beta}))$ so $\beta>0$.
+For spatial layer $l$ and head $h$, the logit is
+\begin{equation}
+\ell^{(h)}_{ij,t}
+=
+\mathrm{LeakyReLU}\!\left(
+\mathbf{a}^{(h)\top}
+\left[
+\mathbf{W}^{(h)}\mathbf{h}^{(l)}_{i,t}\,\|\,\mathbf{W}^{(h)}\mathbf{h}^{(l)}_{j,t}
+\right]
+\right)
++
+\beta\log(P_{ij,t}+\epsilon),
+\qquad j\in\mathcal{N}(i),
+\label{eq:spatial_logit}
+\end{equation}
+with $\epsilon=10^{-6}$.
+Neighborhood softmax yields $\pi^{(h)}_{ij,t}$ and aggregation is
+\begin{equation}
+\tilde{\mathbf{h}}^{(l,h)}_{i,t}
+=
+\sum_{j\in\mathcal{N}(i)}\pi^{(h)}_{ij,t}\mathbf{W}^{(h)}\mathbf{h}^{(l)}_{j,t}.
+\label{eq:spatial_agg}
+\end{equation}
+Heads are concatenated and activated:
+\begin{equation}
+\mathbf{h}^{(l+1)}_{i,t}
+=
+\mathrm{ELU}\!\left(\mathrm{Concat}_{h=1}^{H_s}\tilde{\mathbf{h}}^{(l,h)}_{i,t}\right).
+\label{eq:head_concat}
+\end{equation}
+After $L_s$ layers, we obtain $\mathbf{H}_{\mathrm{spatial},t}\in\mathbb{R}^{C\times d}$.
+
+\paragraph{Tokenization and causal local temporal attention.}
+We flatten $\mathbf{H}_{\mathrm{spatial},t}$ into a temporal token
+\begin{equation}
+\mathbf{z}_t
+=
+\mathbf{W}_{\mathrm{proj}}\,\mathrm{vec}(\mathbf{H}_{\mathrm{spatial},t})
++
+\mathbf{b}_{\mathrm{proj}}
+\in\mathbb{R}^{d_{\mathrm{model}}}.
+\label{eq:temporal_token}
+\end{equation}
+We apply \emph{causal local temporal attention} (CLTA)~\cite{vaswani2017attention}, restricting attention to the most recent $L$ windows with mask
+\begin{equation}
+m_{t,s}
+=
+\begin{cases}
+0, & \max(1,t-L+1)\le s\le t,\\
+-\infty, & \text{otherwise}.
+\end{cases}
+\label{eq:causal_mask}
+\end{equation}
+In streaming mode, we cache only the most recent $L-1$ key/value pairs per head, so the temporal state does not grow with $T$.
+(We cache both keys and values; constants are omitted in big-$O$ notation.)
+
+\paragraph{Prediction head.}
+Let $\mathbf{h}_t\in\mathbb{R}^{d_{\mathrm{model}}}$ be the temporal output at time $t$.
+We predict fatigue with a sigmoid output:
+\begin{equation}
+\hat{y}_t
+=
+\sigma(\mathbf{w}_{\mathrm{out}}^{\top}\mathbf{h}_t + b_{\mathrm{out}}).
+\label{eq:prediction}
+\end{equation}
+
+\paragraph{Streaming forward pass.}
+Algorithm~\ref{alg:haste_stream} summarizes streaming inference at time $t$.
+
+\begin{algorithm}[!t]
+\caption{Streaming inference of HASTE at time $t$}
+\label{alg:haste_stream}
+\begin{algorithmic}
+\Require Window input $\mathbf{X}_t\in\mathbb{R}^{C\times B}$; physical graph $\mathcal{G}^{\mathrm{phy}}$ and $\mathbf{P}^{\mathrm{phy}}$;
+previous spectral state $\mathbf{r}_{t-1}$; temporal cache $\mathcal{C}_{t-1}$; hyperparameters $K$ and $L$
+\Ensure Prediction $\hat{y}_t$; updated spectral state $\mathbf{r}_{t}$; updated cache $\mathcal{C}_{t}$
+\State Compute $\mathbf{u}_t$ by averaging $\mathbf{X}_t$ over electrodes
+\State Update $\mathbf{r}_t\leftarrow \mathrm{GRU}(\mathbf{u}_t,\mathbf{r}_{t-1})$ and compute $\boldsymbol{\alpha}_t$
+\State Select $\mathcal{B}_t\leftarrow \mathrm{TopK}(\boldsymbol{\alpha}_t,K)$ and masked weights $\{\bar{\alpha}_{t,b}\}_{b\in\mathcal{B}_t}$
+\For{each $b\in\mathcal{B}_t$}
+\State Compute embeddings $\mathbf{e}_{:,t,b}$ by Eq.~\eqref{eq:band_embed}
+\State Compute similarities on physical edges by Eq.~\eqref{eq:similarity_small}
+\State Compute $\mathbf{P}^{\mathrm{func}}_{t,b}$ by Eq.~\eqref{eq:P_func_band}
+\EndFor
+\State Fuse $\mathbf{P}^{\mathrm{func}}_t$ by Eq.~\eqref{eq:masked_fusion}
+\State Compute $g_t$ by Eq.~\eqref{eq:gate} and obtain $\mathbf{P}_t$ by Eq.~\eqref{eq:gate_fusion_method}
+\State Fuse features to $\mathbf{x}_t$ using $\boldsymbol{\alpha}_t$
+\State Run spatial encoder to obtain $\mathbf{H}_{\mathrm{spatial},t}$
+\State Tokenize to $\mathbf{z}_t$ by Eq.~\eqref{eq:temporal_token}
+\State Apply CLTA with mask in Eq.~\eqref{eq:causal_mask} and update cache $\mathcal{C}_t$
+\State Predict $\hat{y}_t$ by Eq.~\eqref{eq:prediction}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Objective and Streaming Cost}
+\label{sec:method_objective}
+
+
+\paragraph{Training objective.}
+We train with regression accuracy, output smoothness, and drift regularization:
+\begin{equation}
+\mathcal{L}
+=
+\mathcal{L}_{\mathrm{reg}}
++
+\lambda_{\mathrm{pred}}\mathcal{L}_{\mathrm{pred}}
++
+\lambda_{\mathrm{band}}\mathcal{L}_{\mathrm{band}}
++
+\lambda_{\mathrm{graph}}\mathcal{L}_{\mathrm{graph}}.
+\label{eq:final_loss}
+\end{equation}
+The regression loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{reg}}
+=
+\frac{1}{T}\sum_{t=1}^{T}(y_t-\hat{y}_t)^2,
+\label{eq:L_reg}
+\end{equation}
+and the prediction smoothness loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{pred}}
+=
+\frac{1}{T-1}\sum_{t=2}^{T}(\hat{y}_{t}-\hat{y}_{t-1})^2.
+\label{eq:L_pred}
+\end{equation}
+We penalize drift of the functional prior and the prior-mixing gate:
+\begin{equation}
+\mathcal{L}_{\mathrm{graph}}
+=
+\frac{1}{T-1}\sum_{t=2}^{T}\left\|\mathbf{P}^{\mathrm{func}}_{t}-\mathbf{P}^{\mathrm{func}}_{t-1}\right\|_{F}^{2}
++
+\frac{1}{T-1}\sum_{t=2}^{T}(g_{t}-g_{t-1})^2.
+\label{eq:L_graph}
+\end{equation}
+
+\paragraph{Streaming cost.}
+Let $\bar{d}$ be the average node degree in the physical graph, so $|\mathcal{E}^{\mathrm{phy}}|=O(C\bar{d})$.
+With band gating, functional prior construction is performed for $K$ bands and only on physical edges.
+Using the low-dimensional similarity in Eq.~\eqref{eq:similarity_small}, its per-window cost is $O(KC\bar{d}d_s)$.
+Graph-restricted spatial attention costs $O(H_sC\bar{d}d)$.
+CLTA costs $O(HLd_k)$ per window.
+
+We summarize per-window complexity as
+\begin{equation}
+\mathcal{C}_{\mathrm{win}}
+=
+O\!\left(KC\bar{d}d_s + H_sC\bar{d}d + HLd_k\right),
+\label{eq:complexity_win}
+\end{equation}
+and persistent memory as
+\begin{equation}
+\mathcal{M}_{\mathrm{state}}
+=
+O\!\left(d_r + HLd_k + |\mathcal{E}^{\mathrm{phy}}|\right),
+\label{eq:memory_state}
+\end{equation}
+which does not grow with session length $T$.
+\section{Experiments}
+\label{sec:experiments}
+
+
+Our experiments assess whether HASTE can serve as a deployable streaming fatigue estimator.
+We organize the evaluation around three questions that form a chain of evidence:
+(1) \emph{Accuracy:} can HASTE achieve accurate \emph{subject-independent} continuous regression under strict causality?
+(2) \emph{Deployability:} does it maintain bounded latency and memory as session length grows?
+(3) \emph{Mechanisms:} which components are responsible for the gains, and what internal signals explain the behavior?
+We answer these questions using a unified protocol that controls inputs, splits, and causality across all methods.
+
+\subsection{Evaluation Setup}
+\label{sec:exp_setup}
+
+\paragraph{Datasets.}
+We evaluate HASTE on three public EEG fatigue datasets that differ in supervision source, montage density, and release format (Table~\ref{tab:dataset_summary}). Together, they span heterogeneous targets---continuous PERCLOS trajectories, reaction-time-derived indices, and physician-annotated fatigue levels mapped to $[0,1]$---and cover increasingly dense montages, which stress-test topology-guided spatial modeling across settings.
+
+\emph{SEED-VIG}~\cite{Zheng2017CriticalBands} provides a public feature-level release for 23 subjects performing a prolonged simulated driving task, together with continuous PERCLOS labels in $[0,1]$. In this work, we use its released five-band DE features rather than claiming a unified raw-signal preprocessing pipeline for this dataset.
+
+\emph{SADT}~\cite{cao2019multi} contains 62 sessions from 27 subjects recorded during a 90-minute sustained-attention driving task. The public raw release contains 32 recorded signals sampled at 500\,Hz, including 30 scalp EEG channels and two mastoid references; in our implementation, we retain the 30 scalp EEG channels. Lane-departure events are induced and the corresponding reaction time (RT) is provided. We convert RT into a continuous drowsiness index (DI) in $[0,1]$ via a monotonic, long-tail-robust mapping.
+
+\emph{MPD-DF}~\cite{Li2026MPDDF} provides 32-channel EEG from 50 subjects in a standardized 2-hour simulated driving task, together with physician annotations of fatigue levels based on EEG and multimodal physiological evidence. The public release provides second-resolved aligned labels derived from five ordered fatigue levels; in our regression setting, we map these ordered labels to $[0,1]$.
+
+\paragraph{Streaming protocol and pre-processing.}
+All methods are evaluated under strict causality: at each time step $t$, predictions may use only observations up to and including $t$. For attention-based baselines with global self-attention (e.g., EEG-Conformer), we enforce non-anticipativity using a standard causal mask so each query attends only to past tokens. This preserves the original full-history modeling form, but the per-update compute/state can still grow with the session length $T$. In contrast, HASTE uses causal local temporal attention with a fixed look-back window and a key--value cache, so its persistent state does not grow with $T$.
+
+For consistency across datasets, we operate on 1-second updates represented by five-band DE features. For SADT and MPD-DF, raw EEG is band-pass filtered to 1--50\,Hz, downsampled to 128\,Hz, segmented into non-overlapping 1-second windows, and converted to DE features in the five commonly used bands $\delta$ (1--3\,Hz), $\theta$ (4--7\,Hz), $\alpha$ (8--13\,Hz), $\beta$ (14--30\,Hz), and $\gamma$ (31--50\,Hz). For SEED-VIG, we use the public five-band DE feature release and align it to the same streaming evaluation protocol. Continuous or mapped labels are assigned to each 1-second update, yielding $\mathbf{X}_t \in \mathbb{R}^{C \times 5}$ at every time step.
+
+Throughout, streaming refers to step-wise model updates on sequential window features: the model does not access future windows during inference. Unless stated otherwise, the reported per-update latency and GPU memory profile the neural model forward pass on precomputed features (batch size 1) and exclude feature extraction.
+
+\begin{table}[!t]
+\centering
+\caption{Summary of the three evaluation datasets.}
+\label{tab:dataset_summary}
+\renewcommand{\arraystretch}{1.12}
+\setlength{\tabcolsep}{3pt} 
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+& \textbf{SEED-VIG} & \textbf{SADT} & \textbf{MPD-DF} \\
+\midrule
+Publication year          & 2017       & 2019       & 2026 \\
+Subjects / sessions       & 23\,/\,23  & 27\,/\,62  & 50\,/\,50 \\
+Used channels $C$         & 17         & 30         & 32 \\
+Native release            & DE features + PERCLOS & Raw EEG + RT & Raw EEG + physician labels \\
+Raw EEG sampling rate (Hz)& --         & 500        & 500 \\
+Session duration          & ${\sim}$2\,h & ${\sim}$90\,min & ${\sim}$2\,h \\
+Target source             & PERCLOS    & DI (from RT) & Ordered physician levels \\
+Regression target used    & $[0,1]$    & $[0,1]$    & mapped to $[0,1]$ \\
+Evaluation protocol       & LOSO       & LOSO       & LOSO \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+\paragraph{Baselines.}
+We compare HASTE with six representative baselines spanning CNNs, RNNs, Transformers, and GNNs.
+All baselines are re-implemented under the same streaming protocol, the same DE features, and the same LOSO splits.
+\begin{itemize}
+  \item \textbf{EEGNet}~\cite{Lawhern2018EEGNet}: compact temporal--spatial CNN adapted to regression with causal padding.
+  \item \textbf{TSception}~\cite{ding2023tsception}: multi-scale temporal--spatial CNN adapted to regression with causal convolutions.
+  \item \textbf{EEG-Conformer}~\cite{song2023eeg}: CNN--Transformer hybrid with full-history causal attention (causal mask).
+  \item \textbf{RGNN}~\cite{zhong2020rgnn}: regularized GNN with a biologically informed adjacency; we use a regression head.
+  \item \textbf{NHGNet}~\cite{xu2025nhgnet}: GNN with a learnable dense graph module; we use a regression head.
+  \item \textbf{Compact GRU}: two-layer GRU with a linear regression head, serving as a minimal bounded-memory streaming baseline.
+\end{itemize}
+
+\paragraph{Implementation details.}
+Table~\ref{tab:hyperparams} summarizes shared hyper-parameters.
+We set the physical $k$NN degree to $k{=}5$ for SEED-VIG (17 channels) and $k{=}7$ for SADT/MPD-DF (30/32 channels),
+reflecting higher montage density.
+Unless stated otherwise, experiments run on a single NVIDIA RTX 3090 GPU.
+
+\begin{table}[!t]
+\centering
+\caption{Implementation details and hyper-parameters (shared unless otherwise stated).}
+\label{tab:hyperparams}
+\renewcommand{\arraystretch}{1.10}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{ll}
+\toprule
+\textbf{Item} & \textbf{Value} \\
+\midrule
+Pre-processing & Band-pass 1--50\,Hz; downsample to 128\,Hz \\
+Windowing & 1\,s non-overlapping windows; labels interpolated to centers \\
+Features & DE in 5 bands ($\delta,\theta,\alpha,\beta,\gamma$) \\
+Topology degree $k$ & 5 (SEED-VIG); 7 (SADT/MPD-DF) \\
+Look-back $L$ (CLTA) & 10 \\
+Active bands $K$ & 3 \\
+Similarity dim $d_s$ & 16 \\
+Dims & $d{=}64$, $d_{\mathrm{model}}{=}128$, $d_r{=}32$ \\
+Spatial module & $H_s{=}4$ heads, $L_s{=}2$ layers \\
+Temporal module & $H{=}4$ heads \\
+Optimizer & AdamW ($lr{=}1\mathrm{e}{-}3$, $wd{=}1\mathrm{e}{-}4$) \\
+Training & batch size 32; max epochs 100; 3 seeds \\
+Loss weights & $\lambda_{\mathrm{pred}}{=}0.1$, $\lambda_{\mathrm{band}}{=}0.01$, $\lambda_{\mathrm{graph}}{=}0.01$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Main Results}
+\label{sec:exp_main}
+
+Table~\ref{tab:main_results} reports subject-independent continuous fatigue regression under streaming inference on all three datasets.
+HASTE achieves the best PCC and the lowest RMSE/MAE on each dataset.
+The gains are consistent across heterogeneous label sources and montage densities, supporting robust cross-subject generalization
+in realistic streaming settings.
+
+
+\begin{table}[!t]
+\centering
+\caption{Subject-independent continuous fatigue regression under streaming inference (LOSO, mean\,$\pm$\,std over 3 seeds). Best and second best per dataset/metric are in \textbf{bold} and \underline{underlined}. Cost denotes per-update state/memory scaling with respect to session length $T$.}
+\label{tab:main_results}
+
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{4.2pt}
+\footnotesize
+
+\begin{tabular}{@{}l c c r r r@{}}
+\toprule
+\multirow{2}{*}{\textbf{Method}} &
+\multirow{2}{*}{\textbf{Paradigm}} &
+\multirow{2}{*}{\textbf{Cost}} &
+\multicolumn{3}{c}{\textbf{Metrics}} \\
+\cmidrule(lr){4-6}
+& & & \textbf{PCC}$\uparrow$ & \textbf{RMSE}$\downarrow$ & \textbf{MAE}$\downarrow$ \\
+\midrule
+
+\multicolumn{6}{@{}l@{}}{\textit{SEED-VIG}} \\
+EEGNet        & CNN           & $O(1)$ & 0.6847\,${\pm}$\,0.018 & 0.1583\,${\pm}$\,0.007 & 0.1221\,${\pm}$\,0.006 \\
+TSception     & CNN           & $O(1)$ & 0.7159\,${\pm}$\,0.015 & 0.1479\,${\pm}$\,0.006 & 0.1138\,${\pm}$\,0.005 \\
+EEG-Conformer & CNN+Trf       & $O(T)$ & \underline{0.7831\,${\pm}$\,0.012} & \underline{0.1322\,${\pm}$\,0.005} & \underline{0.1015\,${\pm}$\,0.004} \\
+RGNN          & GNN (fixed)   & $O(1)$ & 0.7392\,${\pm}$\,0.016 & 0.1418\,${\pm}$\,0.006 & 0.1093\,${\pm}$\,0.005 \\
+NHGNet        & GNN (learned) & $O(1)$ & 0.7634\,${\pm}$\,0.014 & 0.1371\,${\pm}$\,0.006 & 0.1058\,${\pm}$\,0.005 \\
+Compact GRU   & RNN           & $O(1)$ & 0.6518\,${\pm}$\,0.021 & 0.1647\,${\pm}$\,0.008 & 0.1274\,${\pm}$\,0.007 \\
+\addlinespace[2pt]
+\rowcolor{blue!7}
+\textbf{HASTE (ours)} & Topo+Attn & $O(1)$ &
+\textbf{0.8274\,${\pm}$\,0.011} & \textbf{0.1187\,${\pm}$\,0.004} & \textbf{0.0912\,${\pm}$\,0.003} \\
+\midrule
+
+\multicolumn{6}{@{}l@{}}{\textit{SADT}} \\
+EEGNet        & CNN           & $O(1)$ & 0.5983\,${\pm}$\,0.024 & 0.2138\,${\pm}$\,0.011 & 0.1689\,${\pm}$\,0.009 \\
+TSception     & CNN           & $O(1)$ & 0.6347\,${\pm}$\,0.021 & 0.2012\,${\pm}$\,0.010 & 0.1571\,${\pm}$\,0.008 \\
+EEG-Conformer & CNN+Trf       & $O(T)$ & \underline{0.7058\,${\pm}$\,0.017} & \underline{0.1837\,${\pm}$\,0.008} & \underline{0.1425\,${\pm}$\,0.006} \\
+RGNN          & GNN (fixed)   & $O(1)$ & 0.6715\,${\pm}$\,0.020 & 0.1936\,${\pm}$\,0.009 & 0.1512\,${\pm}$\,0.007 \\
+NHGNet        & GNN (learned) & $O(1)$ & 0.6896\,${\pm}$\,0.018 & 0.1891\,${\pm}$\,0.009 & 0.1473\,${\pm}$\,0.007 \\
+Compact GRU   & RNN           & $O(1)$ & 0.5672\,${\pm}$\,0.027 & 0.2251\,${\pm}$\,0.012 & 0.1786\,${\pm}$\,0.010 \\
+\addlinespace[2pt]
+\rowcolor{blue!7}
+\textbf{HASTE (ours)} & Topo+Attn & $O(1)$ &
+\textbf{0.7512\,${\pm}$\,0.014} & \textbf{0.1694\,${\pm}$\,0.007} & \textbf{0.1318\,${\pm}$\,0.005} \\
+\midrule
+
+\multicolumn{6}{@{}l@{}}{\textit{MPD-DF}} \\
+EEGNet        & CNN           & $O(1)$ & 0.5623\,${\pm}$\,0.029 & 0.2284\,${\pm}$\,0.013 & 0.1815\,${\pm}$\,0.011 \\
+TSception     & CNN           & $O(1)$ & 0.5941\,${\pm}$\,0.026 & 0.2153\,${\pm}$\,0.012 & 0.1697\,${\pm}$\,0.010 \\
+EEG-Conformer & CNN+Trf       & $O(T)$ & \underline{0.6689\,${\pm}$\,0.021} & \underline{0.1971\,${\pm}$\,0.010} & \underline{0.1533\,${\pm}$\,0.008} \\
+RGNN          & GNN (fixed)   & $O(1)$ & 0.6348\,${\pm}$\,0.024 & 0.2059\,${\pm}$\,0.011 & 0.1612\,${\pm}$\,0.009 \\
+NHGNet        & GNN (learned) & $O(1)$ & 0.6527\,${\pm}$\,0.022 & 0.2017\,${\pm}$\,0.010 & 0.1576\,${\pm}$\,0.008 \\
+Compact GRU   & RNN           & $O(1)$ & 0.5281\,${\pm}$\,0.032 & 0.2396\,${\pm}$\,0.014 & 0.1927\,${\pm}$\,0.012 \\
+\addlinespace[2pt]
+\rowcolor{blue!7}
+\textbf{HASTE (ours)} & Topo+Attn & $O(1)$ &
+\textbf{0.7143\,${\pm}$\,0.018} & \textbf{0.1826\,${\pm}$\,0.009} & \textbf{0.1423\,${\pm}$\,0.007} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\centering
+\caption{Statistical significance of HASTE vs.\ each baseline
+(two-sided Wilcoxon signed-rank test on Fisher-$z$ transformed per-subject PCC,
+per-subject values averaged over three seeds).}
+\label{tab:significance}
+\renewcommand{\arraystretch}{1.12}
+\setlength{\tabcolsep}{5pt}
+\footnotesize
+\begin{tabular}{lccc}
+\toprule
+\textbf{Baseline}
+& \textbf{SEED-VIG} ($N{=}23$)
+& \textbf{SADT} ($N{=}27$)
+& \textbf{MPD-DF} ($N{=}50$) \\
+\midrule
+Compact GRU
+& $<$0.001$^{***}$ & $<$0.001$^{***}$ & $<$0.001$^{***}$ \\
+EEGNet
+& $<$0.001$^{***}$ & $<$0.001$^{***}$ & $<$0.001$^{***}$ \\
+TSception
+& $<$0.001$^{***}$ & $<$0.001$^{***}$ & $<$0.001$^{***}$ \\
+RGNN
+& \phantom{$<$}0.002$^{**}$\phantom{0}
+& $<$0.001$^{***}$ & $<$0.001$^{***}$ \\
+NHGNet
+& \phantom{$<$}0.004$^{**}$\phantom{0}
+& \phantom{$<$}0.002$^{**}$\phantom{0}
+& $<$0.001$^{***}$ \\
+EEG-Conformer
+& \phantom{$<$}0.012$^{*}$\phantom{00}
+& \phantom{$<$}0.005$^{**}$\phantom{0}
+& $<$0.001$^{***}$ \\
+\bottomrule
+\multicolumn{4}{l}{\scriptsize $^{***}\,p<0.001$;\quad $^{**}\,p<0.01$;\quad $^{*}\,p<0.05$.}
+\end{tabular}
+\end{table}
+
+To assess statistical reliability, we conduct two-sided Wilcoxon signed-rank tests
+on Fisher-$z$ transformed per-subject PCC values (HASTE vs.\ each baseline,
+with per-subject PCC averaged over three seeds).
+Table~\ref{tab:significance} reports the resulting $p$-values.
+HASTE significantly outperforms all baselines on all three datasets ($p<0.05$ in all 18 comparisons).
+For SADT, where some subjects have multiple sessions, per-subject PCC is obtained by averaging over that subject's sessions before applying the signed-rank test.
+EEG-Conformer is the strongest competing baseline and therefore serves as the reference comparison highlighted in Fig.~\ref{fig:persubject}.
+The smallest margin occurs on SEED-VIG against EEG-Conformer, where the difference remains statistically significant ($p=0.012$).
+
+Fig.~\ref{fig:persubject} further visualizes the per-subject PCC distributions.
+HASTE attains the highest median PCC on all three datasets, and its distributions remain relatively concentrated,
+indicating more stable cross-subject performance than the weaker baselines.
+The separation from competing methods is especially clear on SADT and MPD-DF,
+while on SEED-VIG HASTE still preserves the highest center despite a partial overlap with EEG-Conformer.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.98\linewidth]{fig_persubject_boxplot.pdf}
+\caption{Per-subject PCC distributions across three datasets for seven methods.
+Each method is shown as a half-violin with individual subject points, median line, and mean marker.
+(a)~SEED-VIG ($C{=}17$, $N{=}23$).
+(b)~SADT ($C{=}30$, $N{=}27$).
+(c)~MPD-DF ($C{=}32$, $N{=}50$).}
+\label{fig:persubject}
+\end{figure}
+
+\subsection{Streaming Scalability}
+\label{sec:exp_scalability}
+
+Fig.~\ref{fig:scaling_T} shows two clearly different scaling regimes as session length $T$ increases from 100 to 10{,}000 windows.
+HASTE, NHGNet, RGNN, TSception, EEGNet, and Compact GRU remain nearly flat,
+indicating constant-state streaming behavior with respect to $T$.
+In particular, HASTE stays around 3\,ms per update and around 50\,MB peak GPU memory across the full range,
+consistent with its bounded-state design (Section~\ref{sec:method_objective}).
+
+By contrast, EEG-Conformer grows sharply with $T$ due to full-history causal attention.
+Its latency increases from only a few milliseconds at $T=10^2$ to well above $10^2$\,ms at $T=10^4$,
+and its peak memory rises from roughly 50\,MB to about 1.6\,GB.
+At long sessions, this yields a substantial efficiency gap in favor of HASTE.
+These results show that HASTE combines the highest accuracy with predictable streaming latency and memory on long recordings.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.98\linewidth]{fig_scaling_T.pdf}
+\caption{Streaming scalability for seven methods.
+(a)~Per-update latency and (b)~peak GPU memory versus session length $T$ (windows).
+Six methods achieve $O(1)$ scaling; EEG-Conformer exhibits $O(T)$ growth due to full-history causal attention.}
+\label{fig:scaling_T}
+\end{figure}
+
+\subsection{Ablations and Additional Analyses}
+\label{sec:exp_ablation}
+
+\paragraph{Component ablation.}
+All ablations are conducted on SEED-VIG under the same LOSO streaming protocol.
+Table~\ref{tab:ablation} removes one component at a time.
+Removing the topology constraint (dense attention) yields the largest PCC drop,
+suggesting that the feasible neighborhood is the strongest inductive bias in the full model.
+Fixing the prior-mixing gate at a constant value also degrades performance,
+indicating that adaptive prior mixing is beneficial.
+Uniform band weights reduce accuracy, supporting time-varying band relevance in streaming.
+Setting $\beta{=}0$ reduces PCC even with masking retained, indicating that log-bias injection is not redundant with feasibility masking.
+Replacing CLTA with full-history causal attention changes accuracy only slightly but sacrifices the favorable scaling in Fig.~\ref{fig:scaling_T},
+which motivates the bounded temporal design.
+Finally, removing $\mathcal{L}_{\mathrm{pred}}$ slightly worsens all regression metrics,
+consistent with the role of trajectory regularization.
+
+
+\begin{table}[!t]
+\centering
+\caption{Component ablation on SEED-VIG (LOSO streaming, mean\,$\pm$\,std over 3 seeds). Second line shows $\Delta$ relative to the full HASTE model.}
+\label{tab:ablation}
+
+\renewcommand{\arraystretch}{1.08}
+\setlength{\tabcolsep}{0pt}
+\footnotesize
+
+\begin{tabular}{@{}l@{\hspace{7pt}}r@{\hspace{7pt}}r@{\hspace{7pt}}r@{}}
+\toprule
+\textbf{Variant} & \textbf{PCC}$\uparrow$ & \textbf{RMSE}$\downarrow$ & \textbf{MAE}$\downarrow$ \\
+\midrule
+\rowcolor{blue!7}
+\textbf{HASTE (full)} &
+\textbf{0.8274\,${\pm}$\,0.011} &
+\textbf{0.1187\,${\pm}$\,0.004} &
+\textbf{0.0912\,${\pm}$\,0.003} \\
+\midrule
+
+w/o Topo (dense attn) &
+\abcell{0.7918\,${\pm}$\,0.014}{-0.036} &
+\abcell{0.1296\,${\pm}$\,0.006}{+0.011} &
+\abcell{0.0998\,${\pm}$\,0.005}{+0.009} \\
+
+Fixed gate ($g_t\equiv 0$) &
+\abcell{0.8041\,${\pm}$\,0.013}{-0.023} &
+\abcell{0.1258\,${\pm}$\,0.005}{+0.007} &
+\abcell{0.0968\,${\pm}$\,0.004}{+0.006} \\
+
+w/o Fuse &
+\abcell{0.8089\,${\pm}$\,0.012}{-0.019} &
+\abcell{0.1243\,${\pm}$\,0.005}{+0.006} &
+\abcell{0.0956\,${\pm}$\,0.004}{+0.004} \\
+
+w/o Bias ($\beta{=}0$) &
+\abcell{0.8112\,${\pm}$\,0.012}{-0.016} &
+\abcell{0.1234\,${\pm}$\,0.005}{+0.005} &
+\abcell{0.0949\,${\pm}$\,0.004}{+0.004} \\
+
+w/o CLTA (full-history) &
+\abcell{0.8248\,${\pm}$\,0.011}{-0.003} &
+\abcell{0.1194\,${\pm}$\,0.004}{+0.001} &
+\abcell{0.0919\,${\pm}$\,0.004}{+0.001} \\
+
+w/o $\mathcal{L}_{\mathrm{pred}}$ &
+\abcell{0.8207\,${\pm}$\,0.012}{-0.007} &
+\abcell{0.1209\,${\pm}$\,0.005}{+0.002} &
+\abcell{0.0931\,${\pm}$\,0.004}{+0.002} \\
+
+\bottomrule
+\end{tabular}
+\end{table}
+\paragraph{Sensitivity analysis.}
+Fig.~\ref{fig:sensitivity}(a) shows that PCC improves rapidly as the look-back length $L$ increases from 3 to 10,
+and then largely plateaus for larger windows.
+Meanwhile, per-update latency grows approximately linearly with $L$, from about 1.5\,ms to about 5\,ms.
+
+Fig.~\ref{fig:sensitivity}(b) shows that performance peaks around $k=5$
+and remains relatively stable in the plateau region $k\in[4,7]$,
+while both overly sparse and overly dense neighborhoods reduce accuracy.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.98\linewidth]{fig_sensitivity_L_k.pdf}
+\caption{Sensitivity analysis on SEED-VIG.
+(a)~PCC versus look-back length $L$ (bars) with per-update latency (line, right axis).
+(b)~PCC versus physical $k$NN degree $k$.}
+\label{fig:sensitivity}
+\end{figure}
+
+\paragraph{Prior strength and prior--attention alignment.}
+To empirically validate the tunability implied by the log-bias form (Eq.~\eqref{eq:monotonic}),
+we fix $\beta$ to several constants (bypassing the softplus parameterization) and measure both regression performance
+and \emph{prior--attention alignment}.
+We quantify alignment via the average Spearman rank correlation between the prior and attention rows restricted to the feasible neighborhood:
+\begin{equation}
+\rho_{\mathrm{align}}
+= \frac{1}{TC}\sum_{t=1}^{T}\sum_{i=1}^{C}
+  \mathrm{Spearman}\!\bigl(\mathbf{p}_{i,t},\,
+  \boldsymbol{\pi}_{i,t}\bigr),
+\quad
+\mathbf{p}_{i,t}
+\triangleq \mathbf{P}_t\bigl(i,\mathcal{N}(i)\bigr).
+\label{eq:align_metric}
+\end{equation}
+
+Table~\ref{tab:beta_sweep} reports results on SEED-VIG.
+As $\beta$ increases, $\rho_{\mathrm{align}}$ increases monotonically, confirming that the additive log-bias provides a continuously tunable knob
+that controls how strongly spatial attention follows the knowledge prior.
+Performance peaks at an intermediate bias strength, suggesting that overly strong priors can over-constrain data-driven adaptation.
+
+\begin{table}[!t]
+\centering
+\caption{Prior strength sweep on SEED-VIG (LOSO streaming, mean\,$\pm$\,std over 3 seeds).
+$\rho_{\mathrm{align}}$: Spearman rank correlation between the fused knowledge prior and spatial attention (Eq.~\ref{eq:align_metric}).
+Learned denotes the full HASTE model with softplus-parameterized $\beta$.}
+\label{tab:beta_sweep}
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{4pt}
+\footnotesize
+\begin{tabular}{lcccc}
+\toprule
+$\beta$ \textbf{setting}
+& \textbf{PCC}$\uparrow$
+& \textbf{RMSE}$\downarrow$
+& \textbf{MAE}$\downarrow$
+& $\boldsymbol{\rho}_{\mathrm{align}}$$\uparrow$ \\
+\midrule
+0 (no bias)
+& 0.8112\,$\pm$\,.012
+& 0.1234\,$\pm$\,.005
+& 0.0949\,$\pm$\,.004
+& 0.312\,$\pm$\,.028 \\
+0.25
+& 0.8165\,$\pm$\,.012
+& 0.1218\,$\pm$\,.005
+& 0.0938\,$\pm$\,.004
+& 0.423\,$\pm$\,.025 \\
+0.5
+& 0.8219\,$\pm$\,.011
+& 0.1202\,$\pm$\,.005
+& 0.0925\,$\pm$\,.004
+& 0.537\,$\pm$\,.023 \\
+1.0
+& 0.8261\,$\pm$\,.011
+& 0.1192\,$\pm$\,.004
+& 0.0916\,$\pm$\,.003
+& 0.651\,$\pm$\,.021 \\
+2.0
+& 0.8247\,$\pm$\,.011
+& 0.1196\,$\pm$\,.004
+& 0.0920\,$\pm$\,.004
+& 0.762\,$\pm$\,.019 \\
+4.0
+& 0.8158\,$\pm$\,.013
+& 0.1224\,$\pm$\,.005
+& 0.0941\,$\pm$\,.004
+& 0.876\,$\pm$\,.016 \\
+8.0
+& 0.8023\,$\pm$\,.014
+& 0.1267\,$\pm$\,.006
+& 0.0973\,$\pm$\,.005
+& 0.934\,$\pm$\,.012 \\
+\midrule
+Learned (softplus)
+& \textbf{0.8274\,$\pm$\,.011}
+& \textbf{0.1187\,$\pm$\,.004}
+& \textbf{0.0912\,$\pm$\,.003}
+& 0.683\,$\pm$\,.020 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Case Studies}
+\label{sec:exp_case}
+
+Fig.~\ref{fig:case_curve} shows a representative long session from SEED-VIG.
+For visual clarity, the window-level predictions (originally at 1\,Hz due to 1\,s windows) are subsampled by a factor of 8
+to match the 8\,s label cadence.
+
+Panel~(a) shows that the HASTE prediction closely follows the overall rise of the ground-truth PERCLOS trajectory
+while remaining smooth and tracking local fluctuations.
+
+Panel~(b) reveals a gradual redistribution of band relevance over the session:
+the beta and alpha bands occupy the largest proportions in the earlier stage,
+whereas the delta and theta bands increase later and beta-band relevance decreases substantially;
+alpha-band relevance remains consistently prominent throughout the session.
+
+Panel~(c) shows that the prior-mixing gate starts at a higher level and gradually decreases over time.
+In the plotted trajectory, the earlier part of the session is more anatomy-dominant,
+whereas the later part becomes more functional-dominant.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.98\linewidth]{fig_case_curve_alpha_gate.pdf}
+\caption{Case study on SEED-VIG: streaming prediction trajectory over a representative session.
+(a)~Ground-truth PERCLOS and HASTE prediction.
+(b)~Band relevance weights $\boldsymbol{\alpha}_t$ (stacked area).
+(c)~Prior-mixing gate $g_t$; in the figure as shown, larger values correspond to stronger anatomical contribution,
+whereas smaller values correspond to stronger functional contribution.}
+\label{fig:case_curve}
+\end{figure*}
+
+Fig.~\ref{fig:heatmaps} visualizes stage-dependent band-specific coupling patterns on SEED-VIG.
+In the alert and transition stages, the beta and gamma bands exhibit the most pronounced posterior/occipital hotspots,
+with the alpha band showing a weaker but still visible posterior concentration.
+
+In the fatigue stage, the spatial pattern shifts:
+the delta and theta bands display pronounced bilateral frontal enhancement,
+while the alpha band retains a localized posterior hotspot and the beta/gamma patterns become less spatially dominant than in earlier stages,
+although posterior concentration remains visible.
+
+Overall, the figure suggests a redistribution from higher-frequency posterior-dominant coupling in the alert/transition stages
+toward stronger low-frequency frontal coupling in fatigue.
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=0.98\linewidth]{fig_prior_attention_heatmaps_2.pdf}
+\caption{Band-specific coupling-weight patterns at three fatigue stages on SEED-VIG.
+Columns correspond to the five frequency bands ($\delta,\theta,\alpha,\beta,\gamma$);
+rows correspond to three fatigue stages (Alert, Transition, Fatigue).
+For each stage, the upper panel shows the band-wise coupling/attention matrix,
+and the lower panel shows the corresponding scalp projection of aggregated coupling intensity.
+All heatmaps share the same electrode ordering and a unified color scale.}
+\label{fig:heatmaps}
+\end{figure*}
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented HASTE, a hybrid-attention streaming topology-aware estimator for subject-independent EEG fatigue monitoring with continuous or continuously mapped labels. HASTE combines causal spectral fusion, topology-constrained adaptive spatial coupling with drift regularization, and prior-biased graph-restricted attention. It further employs causal local temporal attention with a fixed look-back window and a key--value cache to enable low-latency, step-wise inference with constant memory with respect to session length. Experiments under a unified LOSO streaming protocol on SEED-VIG, SADT, and MPD-DF show consistent gains over representative CNN, RNN, Transformer, and GNN baselines while preserving predictable streaming latency and memory on long sessions.
+
+This work has several limitations. First, we focus on window-level DE features; extending HASTE to raw-EEG encoders and fully causal front-end feature extraction is an important next step. Second, we evaluate subject-independent LOSO generalization without explicit domain adaptation; integrating lightweight adaptation while retaining bounded streaming state is a promising direction. Finally, while the physical $k$NN graph provides a stable anatomy-feasible inductive bias, richer priors (e.g., montage-specific long-range links) may further improve performance under dense montages.
+\newpage
+\bibliographystyle{elsarticle-num} 
+\bibliography{reference}
+\end{document}
