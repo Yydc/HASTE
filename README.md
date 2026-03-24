@@ -261,21 +261,6 @@ pytest tests/ -v
 
 ---
 
-## Citation
-
-If you find this work useful, please cite:
-
-```bibtex
-@article{niu2025haste,
-  title   = {From Electrode Geometry to Adaptive Coupling: {HASTE} for Streaming {EEG} Fatigue Monitoring},
-  author  = {Niu, Qiyu and Xie, Yi and Liu, Siao and Wang, Shouyan and Nie, Yingnan},
-  journal = {Knowledge-Based Systems},
-  year    = {2025}
-}
-```
-
----
-
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
