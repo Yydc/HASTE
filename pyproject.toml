@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "haste-eeg"
@@ -42,6 +42,9 @@ dev = [
 
 [project.scripts]
 haste-train = "train:main"
+
+[tool.setuptools]
+py-modules = ["train"]  # needed by the haste-train entry point
 
 [tool.setuptools.packages.find]
 include = ["models*", "data*"]

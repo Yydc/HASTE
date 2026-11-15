@@ -132,7 +132,10 @@ class SEEDVIGSequenceDataset(Dataset):
         if self.channel_indices is not None:
             x = x[:, self.channel_indices, :]
         y = perclos.astype(np.float32)  # (T,) in [0,1] range for competition
-        return x, y
+
+        # Align lengths (truncate to the common horizon, as for SADT / MPD-DF)
+        T = min(x.shape[2], len(y))
+        return x[:, :, :T], y[:T]
 
     def __len__(self):
         return len(self.pairs)
@@ -148,10 +151,7 @@ class SEEDVIGSequenceDataset(Dataset):
             x = torch.from_numpy(x_np)
             y = torch.tensor(y_np, dtype=torch.float32)
 
-        # channel selection is already applied in _load_pair when caching.
-        # If cache is disabled and channel_indices provided, ensure selection here too (defensive).
-        if self.channel_indices is not None and not self.cache:
-            x = x[:, self.channel_indices, :]
+        # channel selection is already applied in _load_pair (cached or not).
 
         if self.normalize:
             mean = x.mean(dim=2, keepdim=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run LOSO training across all folds for a given dataset config.
+# Run LOSO training across all folds and 3 seeds (paper Table 2) for a given dataset config.
 # Usage: bash scripts/run_all_folds.sh configs/seedvig.yaml [extra args...]
 #
 # Example:
@@ -17,6 +17,7 @@ fi
 
 CONFIG="$1"
 shift
+SEEDS="${SEEDS:-2025 2026 2027}"
 
 # Extract n_folds from the YAML config
 N_FOLDS=$(python -c "
@@ -27,20 +28,23 @@ print(cfg.get('n_folds', 5))
 ")
 
 echo "============================================"
-echo "HASTE LOSO Training: $CONFIG ($N_FOLDS folds)"
+echo "HASTE LOSO Training: $CONFIG ($N_FOLDS folds, seeds: $SEEDS)"
 echo "============================================"
 
 RESULTS_FILE="results_$(basename "$CONFIG" .yaml).txt"
 > "$RESULTS_FILE"
 
+for SEED in $SEEDS; do
 for FOLD in $(seq 0 $((N_FOLDS - 1))); do
     echo ""
-    echo "--- Fold $FOLD / $N_FOLDS ---"
+    echo "--- Seed $SEED | Fold $FOLD / $N_FOLDS ---"
     python "$ROOT_DIR/train.py" \
         --config "$CONFIG" \
         --fold "$FOLD" \
+        --seed "$SEED" \
         "$@" 2>&1 | tee -a "$RESULTS_FILE"
-    echo "--- Fold $FOLD complete ---"
+    echo "--- Seed $SEED | Fold $FOLD complete ---"
+done
 done
 
 echo ""

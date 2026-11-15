@@ -34,9 +34,10 @@ class SpatialEncoder(nn.Module):
         self.num_channels = num_channels
         self.d_model = d_model
 
-        # Eq. 13: h^(0)_{i,t} = w_in * x_{i,t} + b_in
+        # Sec 4.3: h^(0)_{i,t} = w_in * x_{i,t} + b_in
         self.input_proj = nn.Linear(1, d_model)
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1, num_channels, d_model))
+        # Prior strength beta = log(1 + exp(beta_tilde)) > 0, shared by all layers and heads
+        self.beta_tilde = nn.Parameter(torch.tensor(1.0))
 
         self.layers = nn.ModuleList(
             [SpatialTGALayer(d_model, num_heads, dropout) for _ in range(num_layers)]
@@ -55,7 +56,6 @@ class SpatialEncoder(nn.Module):
         nn.init.xavier_uniform_(self.input_proj.weight)
         if self.input_proj.bias is not None:
             nn.init.zeros_(self.input_proj.bias)
-        nn.init.zeros_(self.pos_embed)
 
     def forward(self, x_fused: torch.Tensor,
                 prior: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -67,10 +67,10 @@ class SpatialEncoder(nn.Module):
         B, C, T = x_fused.shape
         h = x_fused.permute(0, 2, 1).unsqueeze(-1)  # (B, T, C, 1)
         h = self.input_proj(h)                      # (B, T, C, d_model)
-        h = h + self.pos_embed
 
         adj = self.adjacency
         D = self.d_model
+        beta = F.softplus(self.beta_tilde)
 
         for layer in self.layers:
             h_flat = h.reshape(B * T, C, D)
@@ -79,7 +79,7 @@ class SpatialEncoder(nn.Module):
                 prior_flat = prior.reshape(B * T, C, C)
             else:
                 prior_flat = None
-            h_flat = layer(h_flat, adj, prior=prior_flat)
+            h_flat = layer(h_flat, adj, prior=prior_flat, beta=beta)
             h = h_flat.view(B, T, C, D)
 
         return h
@@ -107,7 +107,7 @@ class TemporalEncoder(nn.Module):
         self.in_dim = num_channels * spatial_d_model
         self.d_model = d_model
 
-        # Eq. 15: z_t = W_proj * vec(H_spatial_t) + b_proj
+        # Eq. 22: z_t = W_proj * vec(H_spatial_t) + b_proj
         self.token_proj = nn.Linear(self.in_dim, d_model)
 
         self.layers = nn.ModuleList(
@@ -133,10 +133,19 @@ class TemporalEncoder(nn.Module):
 
         return z  # (B, T, d_model)
 
+    def step(self, H_t: torch.Tensor, caches):
+        """Streaming update. H_t: (B, C, d); caches: list with one KV cache per layer."""
+        z = self.token_proj(H_t.reshape(H_t.shape[0], -1))  # (B, d_model)
+        new_caches = []
+        for layer, cache in zip(self.layers, caches):
+            z, cache = layer.step(z, cache)
+            new_caches.append(cache)
+        return z, new_caches
+
 
 class RegressionHead(nn.Module):
     """
-    Prediction head (Sec 4.3, Eq. 17).
+    Prediction head (Sec 4.3).
     y_hat_t = sigma(w_out^T h_t + b_out)
     """
 
@@ -184,11 +193,12 @@ class HASTModel(nn.Module):
         if adjacency is None:
             adjacency = build_full_adjacency(num_channels)
 
-        # Binary adjacency for masking
-        adj_binary = (adjacency > 0).float()
+        # Binary adjacency for masking, with self-loops (Sec 4.2)
+        eye = torch.eye(num_channels, dtype=torch.bool, device=adjacency.device)
+        adj_binary = ((adjacency > 0) | eye).float()
         self.register_buffer("adj_binary", adj_binary)
 
-        # Row-normalized adjacency as anatomical prior P^phy (Eq. 10)
+        # Row-normalized adjacency as anatomical prior P^phy (Sec 4.2)
         P_phy = row_normalize(adj_binary)
         self.register_buffer("P_phy", P_phy)
 
@@ -237,7 +247,7 @@ class HASTModel(nn.Module):
         self, alpha: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        TopK band gating (Sec 4.2, Eq. 11).
+        TopK band gating (Sec 4.2, Eq. 14).
         alpha: (batch, T, B)
         Returns:
             mask: (batch, T, B) binary
@@ -299,6 +309,34 @@ class HASTModel(nn.Module):
 
         return y_final, y_seq, alpha, P_func, g, P_t
 
+    def init_state(self) -> dict:
+        """Empty streaming state: spectral state r and one CLTA key/value cache per layer."""
+        return {"r": None, "kv": [None] * len(self.temporal_encoder.layers)}
+
+    @torch.no_grad()
+    def step(self, x_t: torch.Tensor, state: Optional[dict] = None):
+        """
+        Streaming inference at time t (Algorithm 1); same outputs as `forward` on the prefix.
+        x_t: (batch, B, C) current window. Returns y_hat_t (batch,), the updated state
+        (r_t, cache C_t) and the interpretable signals {alpha, g, P_t}.
+        """
+        if state is None:
+            state = self.init_state()
+
+        x_fused, alpha, r = self.spectral_fusion.step(x_t, state["r"])
+        alpha = alpha.unsqueeze(1)                                    # (batch, 1, B)
+        active_mask, active_alpha = self._topk_mask_and_weights(alpha)
+        P_func, embed_mean = self.func_prior(
+            x_t.unsqueeze(-1), self.adj_binary, active_mask, active_alpha
+        )
+        g = self.prior_gate(embed_mean)
+        P_t = g * self.P_phy + (1 - g) * P_func                       # (batch, 1, C, C)
+        H_t = self.spatial_encoder(x_fused.unsqueeze(-1), prior=P_t)  # (batch, 1, C, d)
+        h_t, kv = self.temporal_encoder.step(H_t[:, 0], state["kv"])
+        y_t = torch.sigmoid(self.regression_head.fc(h_t)).squeeze(-1)
+
+        return y_t, {"r": r, "kv": kv}, {"alpha": alpha[:, 0], "g": g[:, 0], "P_t": P_t[:, 0]}
+
 
 def hast_loss_fn(
     y_true: torch.Tensor,
@@ -312,7 +350,7 @@ def hast_loss_fn(
     lambda_graph: float = 0.01,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Full HASTE loss (Sec 4.4, Eq. 19-22).
+    Full HASTE loss (Sec 4.4, Eqs. 23-26).
 
     L = L_reg + lambda_pred * L_pred + lambda_band * L_band + lambda_graph * L_graph
 
@@ -325,26 +363,26 @@ def hast_loss_fn(
     if y_true.dim() == 1:
         y_true = y_true.unsqueeze(0)
 
-    # L_reg: MSE over all timesteps (Eq. 20)
+    # L_reg: MSE over all timesteps (Eq. 24)
     L_reg = F.mse_loss(y_seq, y_true)
 
-    # L_pred: prediction smoothness (Eq. 21)
+    # L_pred: prediction smoothness (Eq. 25)
     T = y_seq.shape[1]
     if T > 1:
         L_pred = ((y_seq[:, 1:] - y_seq[:, :-1]) ** 2).mean()
     else:
         L_pred = torch.tensor(0.0, device=y_seq.device)
 
-    # L_band: band drift regularization (Eq. 9)
+    # L_band: band drift regularization (Eq. 13), squared L2 norm summed over bands
     if alpha is not None and alpha.shape[1] > 1:
-        L_band = ((alpha[:, 1:, :] - alpha[:, :-1, :]) ** 2).mean()
+        L_band = ((alpha[:, 1:, :] - alpha[:, :-1, :]) ** 2).sum(dim=-1).mean()
     else:
         L_band = torch.tensor(0.0, device=y_seq.device)
 
-    # L_graph: functional prior drift + gate drift (Eq. 22)
+    # L_graph: functional prior drift + gate drift (Eq. 26), squared Frobenius norm over (C, C)
     L_graph = torch.tensor(0.0, device=y_seq.device)
     if P_func is not None and P_func.shape[1] > 1:
-        L_graph = L_graph + ((P_func[:, 1:] - P_func[:, :-1]) ** 2).mean()
+        L_graph = L_graph + ((P_func[:, 1:] - P_func[:, :-1]) ** 2).sum(dim=(-2, -1)).mean()
     if g is not None and g.shape[1] > 1:
         g_flat = g.squeeze(-1).squeeze(-1)  # (batch, T)
         L_graph = L_graph + ((g_flat[:, 1:] - g_flat[:, :-1]) ** 2).mean()

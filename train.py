@@ -6,11 +6,12 @@ Supports SEED-VIG, SADT, and MPD-DF datasets via YAML config files.
 Usage:
     python train.py --config configs/seedvig.yaml --data-root ./data_seed_vig
     python train.py --config configs/sadt.yaml --fold 0
-    python train.py --config configs/mpddf.yaml --eval-only --checkpoint checkpoints/hast_mpddf_fold0.pth
+    python train.py --config configs/mpddf.yaml --eval-only --checkpoint checkpoints/hast_mpddf_fold0_seed2025.pth
 """
 
 import argparse
 import copy
+import math
 import os
 from typing import Dict, List, Tuple
 
@@ -18,7 +19,7 @@ import numpy as np
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from data import (
@@ -32,7 +33,13 @@ from data import (
     build_mpddf_file_pairs,
     extract_subject_id_mpddf,
 )
-from models import HASTModel, build_full_adjacency, build_knn_gaussian, hast_loss_fn
+from models import (
+    HASTModel,
+    build_full_adjacency,
+    build_knn_adjacency,
+    coords_from_channel_names,
+    hast_loss_fn,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +64,45 @@ def compute_corr(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
     vy = y_pred - y_pred.mean()
     denom = torch.sqrt((vx ** 2).sum()) * torch.sqrt((vy ** 2).sum()) + 1e-8
     return ((vx * vy).sum() / denom).item()
+
+
+def crop_collate(batch):
+    """Batch variable-length sessions (SADT / MPD-DF) by cropping to the shortest one."""
+    T = min(x.shape[-1] for x, _ in batch)
+    return (torch.stack([x[..., :T] for x, _ in batch]),
+            torch.stack([y[:T] for _, y in batch]))
+
+
+class RandomCropDataset(Dataset):
+    """
+    Training on random fixed-length windows of whole sessions.
+
+    Sessions are first z-scored over their full length by the base dataset (the
+    paper's sequence-level normalisation), then a random crop of `crop_len`
+    windows is taken. Each epoch draws ceil(T_i / (crop_len - burn_in)) crops
+    from session i, so every window is covered about once per epoch. Sessions
+    shorter than `crop_len` are returned whole.
+    """
+
+    def __init__(self, sessions: Dataset, crop_len: int, burn_in: int = 0):
+        if crop_len <= burn_in + 1:
+            raise ValueError("train_crop_len must exceed burn_in + 1")
+        self.sessions = sessions
+        self.crop_len = crop_len
+        lengths = [sessions[i][1].shape[0] for i in range(len(sessions))]
+        stride = crop_len - burn_in
+        self.index = [i for i, T in enumerate(lengths) for _ in range(max(1, math.ceil(T / stride)))]
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, j):
+        x, y = self.sessions[self.index[j]]
+        T = y.shape[0]
+        if T <= self.crop_len:
+            return x, y
+        s = int(torch.randint(0, T - self.crop_len + 1, (1,)))
+        return x[..., s:s + self.crop_len], y[s:s + self.crop_len]
 
 
 def load_coords(path: str) -> np.ndarray:
@@ -91,10 +137,14 @@ def build_scheduler(optimizer, args):
 # Dataset factory
 # ---------------------------------------------------------------------------
 
-def get_subject_split(pairs, extract_id_fn, n_folds=5, fold_idx=0, seed=2025):
+def get_subject_split(pairs, extract_id_fn, n_folds=5, fold_idx=0, seed=2025, val_fraction=0.0):
     """
     Split data by subject ID (leave-one-subject-out).
-    A subject appears ONLY in train OR val, never both.
+    Returns train / inner-validation / test pairs and the test subject IDs.
+    The test subject(s) of the fold are never used for training or model selection;
+    early stopping and checkpoint selection use ceil(val_fraction * #train subjects)
+    other training subjects. With val_fraction=0 selection falls back to the test
+    subject (optimistic; kept only for comparison with earlier runs).
     """
     subj_map: Dict[int, List[Tuple[str, str]]] = {}
     for p in pairs:
@@ -103,23 +153,41 @@ def get_subject_split(pairs, extract_id_fn, n_folds=5, fold_idx=0, seed=2025):
 
     unique_subjs = sorted(subj_map.keys())
     print(f"Found {len(unique_subjs)} unique subjects: {unique_subjs}")
+    if n_folds > len(unique_subjs):
+        raise ValueError(
+            f"n_folds={n_folds} > {len(unique_subjs)} subjects found; some folds would be empty. "
+            f"For LOSO set --n-folds {len(unique_subjs)} (check the subject-ID parsing of the file names)."
+        )
 
     rng = np.random.RandomState(seed)
     rng.shuffle(unique_subjs)
 
     folds = np.array_split(unique_subjs, n_folds)
-    val_subjs = set(folds[fold_idx % n_folds])
-    train_subjs = [s for s in unique_subjs if s not in val_subjs]
+    test_subjs = sorted(folds[fold_idx % n_folds].tolist())
+    train_subjs = [s for s in unique_subjs if s not in test_subjs]
 
-    print(f"Fold {fold_idx}/{n_folds} - Val subjects: {sorted(val_subjs)}")
+    n_val = int(np.ceil(val_fraction * len(train_subjs))) if val_fraction > 0 else 0
+    if n_val >= len(train_subjs):
+        raise ValueError(f"val_fraction={val_fraction} leaves no training subjects")
+    if n_val > 0:
+        val_rng = np.random.RandomState(seed + 1 + fold_idx)
+        val_subjs = sorted(val_rng.choice(train_subjs, n_val, replace=False).tolist())
+        train_subjs = [s for s in train_subjs if s not in val_subjs]
+    else:
+        val_subjs = test_subjs
+        print("WARNING: val_fraction=0 -> checkpoint selection on the test subject (optimistic).")
 
-    train_pairs = [p for s in train_subjs for p in subj_map[s]]
-    val_pairs = [p for s in val_subjs for p in subj_map[s]]
-    return train_pairs, val_pairs
+    print(f"Fold {fold_idx}/{n_folds} - Test subjects: {test_subjs} | "
+          f"Inner-val subjects: {val_subjs} | Train subjects: {len(train_subjs)}")
+
+    def to_pairs(subjs):
+        return [p for s in subjs for p in subj_map[s]]
+
+    return to_pairs(train_subjs), to_pairs(val_subjs), to_pairs(test_subjs), test_subjs
 
 
 def build_datasets(args, channel_indices):
-    """Build train and val datasets based on args.dataset."""
+    """Build train, inner-validation and test datasets based on args.dataset."""
     dataset_name = getattr(args, "dataset", "seedvig")
 
     if dataset_name == "seedvig":
@@ -127,9 +195,10 @@ def build_datasets(args, channel_indices):
         perclos_dir = os.path.join(args.data_root, "PERCLOS")
         pairs = build_file_pairs(eeg_dir, perclos_dir)
         assert len(pairs) > 0, "No EEG-PERCLOS file pairs found."
-        train_pairs, val_pairs = get_subject_split(
+        train_pairs, val_pairs, test_pairs, test_subjs = get_subject_split(
             pairs, extract_subject_id,
             n_folds=args.n_folds, fold_idx=args.fold, seed=args.seed,
+            val_fraction=args.val_fraction,
         )
         train_ds = SEEDVIGSequenceDataset(
             train_pairs, normalize=True, cache=args.cache,
@@ -139,13 +208,18 @@ def build_datasets(args, channel_indices):
             val_pairs, normalize=True, cache=args.cache,
             augment=False, channel_indices=channel_indices,
         )
+        test_ds = SEEDVIGSequenceDataset(
+            test_pairs, normalize=True, cache=args.cache,
+            augment=False, channel_indices=channel_indices,
+        )
 
     elif dataset_name == "sadt":
         pairs = build_sadt_file_pairs(args.data_root)
         assert len(pairs) > 0, "No SADT feature-label pairs found."
-        train_pairs, val_pairs = get_subject_split(
+        train_pairs, val_pairs, test_pairs, test_subjs = get_subject_split(
             pairs, extract_subject_id_sadt,
             n_folds=args.n_folds, fold_idx=args.fold, seed=args.seed,
+            val_fraction=args.val_fraction,
         )
         train_ds = SADTDataset(
             train_pairs, normalize=True, cache=args.cache,
@@ -155,13 +229,18 @@ def build_datasets(args, channel_indices):
             val_pairs, normalize=True, cache=args.cache,
             augment=False, channel_indices=channel_indices,
         )
+        test_ds = SADTDataset(
+            test_pairs, normalize=True, cache=args.cache,
+            augment=False, channel_indices=channel_indices,
+        )
 
     elif dataset_name == "mpddf":
         pairs = build_mpddf_file_pairs(args.data_root)
         assert len(pairs) > 0, "No MPD-DF feature-label pairs found."
-        train_pairs, val_pairs = get_subject_split(
+        train_pairs, val_pairs, test_pairs, test_subjs = get_subject_split(
             pairs, extract_subject_id_mpddf,
             n_folds=args.n_folds, fold_idx=args.fold, seed=args.seed,
+            val_fraction=args.val_fraction,
         )
         train_ds = MPDDFDataset(
             train_pairs, normalize=True, cache=args.cache,
@@ -171,41 +250,65 @@ def build_datasets(args, channel_indices):
             val_pairs, normalize=True, cache=args.cache,
             augment=False, channel_indices=channel_indices,
         )
+        test_ds = MPDDFDataset(
+            test_pairs, normalize=True, cache=args.cache,
+            augment=False, channel_indices=channel_indices,
+        )
 
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}. Choose from: seedvig, sadt, mpddf")
 
-    return train_ds, val_ds
+    return train_ds, val_ds, test_ds, test_subjs
 
 
 # ---------------------------------------------------------------------------
 # Adjacency
 # ---------------------------------------------------------------------------
 
+def parse_channel_names(value):
+    """Channel names from YAML (list) or CLI (comma-separated string)."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        value = [v for v in value.split(",") if v.strip()]
+    return [str(v).strip() for v in value]
+
+
 def build_adjacency(args, num_channels, channel_indices):
-    """Build adjacency matrix from coords or default to full graph."""
+    """
+    Physical kNN graph on electrode coordinates (Sec 4.2). Coordinates come from
+    --coords-path, or from --channel-names via the standard 10-05 montage.
+    --dense-graph gives the fully connected 'w/o Topo (dense)' ablation.
+    """
+    if args.dense_graph:
+        print("Using full adjacency (complete graph): 'w/o Topo (dense)' ablation.")
+        return build_full_adjacency(num_channels)
+
+    channel_names = parse_channel_names(args.channel_names)
     if args.coords_path:
         coords = load_coords(args.coords_path)
-        if coords.shape[0] < num_channels:
-            raise ValueError(
-                f"coords has {coords.shape[0]} rows but need at least {num_channels} channels"
-            )
-        if channel_indices is not None:
-            coords = coords[channel_indices]
-        elif coords.shape[0] != num_channels:
-            raise ValueError(
-                f"coords has {coords.shape[0]} rows but num_channels={num_channels}"
-            )
-        if args.coords_normalize:
-            mean = coords.mean(axis=0, keepdims=True)
-            std = coords.std() + 1e-6
-            coords = (coords - mean) / std
-        adj = build_knn_gaussian(coords, k=args.adj_k, sigma=args.adj_sigma, self_loop=True)
-        print(f"k-NN adjacency (k={args.adj_k}, sigma={args.adj_sigma}, "
-              f"adj stats: min={adj.min():.4f}, max={adj.max():.4f}, mean={adj.mean():.4f})")
+        source = args.coords_path
+    elif channel_names:
+        coords = coords_from_channel_names(channel_names)
+        source = "standard_1005 montage: " + ",".join(
+            channel_names if channel_indices is None else [channel_names[i] for i in channel_indices]
+        )
     else:
-        adj = build_full_adjacency(num_channels)
-        print("Using full adjacency (complete graph).")
+        raise ValueError(
+            "HASTE needs electrode positions for the physical kNN graph: set channel_names "
+            "in the config (or --channel-names / --coords-path). Use --dense-graph only for "
+            "the 'w/o Topo (dense)' ablation."
+        )
+
+    if channel_indices is not None:
+        coords = coords[channel_indices]
+    if coords.shape[0] != num_channels:
+        raise ValueError(f"got {coords.shape[0]} electrode positions but num_channels={num_channels}")
+
+    adj = build_knn_adjacency(coords, k=args.adj_k, self_loop=True)
+    avg_deg = (adj.sum() - num_channels).item() / num_channels
+    print(f"Physical kNN graph (k={args.adj_k}, symmetrized + self-loops, "
+          f"avg degree={avg_deg:.2f}) from {source}")
     return adj
 
 
@@ -218,7 +321,7 @@ def get_writer(args):
     try:
         from torch.utils.tensorboard import SummaryWriter
         dataset_name = getattr(args, "dataset", "seedvig")
-        log_dir = os.path.join("runs", f"{dataset_name}_fold{args.fold}")
+        log_dir = os.path.join("runs", f"{dataset_name}_fold{args.fold}_seed{args.seed}")
         writer = SummaryWriter(log_dir=log_dir)
         print(f"TensorBoard logging to: {log_dir}")
         return writer
@@ -241,12 +344,12 @@ def evaluate(
 ) -> Tuple[float, float, float, float, float]:
     model.eval()
     total_loss = 0.0
-    total_mae = 0.0
-    total_rmse = 0.0
+    total_abs = 0.0
+    total_sq = 0.0
+    n_points = 0
     y_true_all = []
     y_pred_all = []
-    y_true_seq_all = []
-    y_pred_seq_all = []
+    session_corrs = []
     n = 0
 
     with torch.no_grad():
@@ -265,28 +368,27 @@ def evaluate(
 
             bs = X_val.size(0)
             total_loss += loss_total.item() * bs
-            y_val_final = y_val[:, -1] if y_val.dim() > 1 else y_val
-            total_mae += torch.abs(y_final - y_val_final).sum().item()
-            total_rmse += torch.sqrt(torch.mean((y_final - y_val_final) ** 2)).item() * bs
             n += bs
 
-            y_true_all.append(y_val.detach().cpu())
+            # Streaming regression: MAE / RMSE over every update y_hat_t (Sec. 5.2)
+            err = y_seq - y_val
+            total_abs += err.abs().sum().item()
+            total_sq += (err ** 2).sum().item()
+            n_points += err.numel()
+
+            # PCC per session, then averaged (per-subject PCC; SADT averages sessions)
+            for i in range(bs):
+                session_corrs.append(compute_corr(y_val[i], y_seq[i]))
+
+            y_true_all.append(y_val[:, -1].detach().cpu())
             y_pred_all.append(y_final.detach().cpu())
-            y_true_seq_all.append(y_val.detach().cpu())
-            y_pred_seq_all.append(y_seq.detach().cpu())
 
     loss_avg = total_loss / max(n, 1)
-    mae_avg = total_mae / max(n, 1)
-    rmse_avg = total_rmse / max(n, 1)
+    mae_avg = total_abs / max(n_points, 1)
+    rmse_avg = (total_sq / max(n_points, 1)) ** 0.5
 
-    y_true_cat = torch.cat(y_true_all, dim=0)
-    y_pred_cat = torch.cat(y_pred_all, dim=0)
-    y_true_final = y_true_cat[:, -1] if y_true_cat.dim() > 1 else y_true_cat
-    corr_final = compute_corr(y_true_final, y_pred_cat)
-
-    y_true_seq_cat = torch.cat(y_true_seq_all, dim=0)
-    y_pred_seq_cat = torch.cat(y_pred_seq_all, dim=0)
-    corr_seq = compute_corr(y_true_seq_cat, y_pred_seq_cat)
+    corr_final = compute_corr(torch.cat(y_true_all), torch.cat(y_pred_all))
+    corr_seq = float(np.mean(session_corrs)) if session_corrs else 0.0
 
     return loss_avg, mae_avg, rmse_avg, corr_final, corr_seq
 
@@ -299,10 +401,11 @@ def train(model, train_loader, val_loader, args, device, writer=None):
     model.to(device)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = build_scheduler(optimizer, args)
-    scaler = torch.amp.GradScaler(
-        device_type="cuda" if device.type == "cuda" else "cpu",
-        enabled=args.amp,
-    )
+    # torch.amp.GradScaler does not exist before torch 2.3 and takes `device`, not
+    # `device_type`; loss scaling is only needed for CUDA fp16, so use the CUDA scaler.
+    scaler = torch.cuda.amp.GradScaler(enabled=args.amp and device.type == "cuda")
+
+    burn_in = args.burn_in if args.train_crop_len > 0 else 0
 
     higher_is_better = args.checkpoint_metric in ("corr_seq", "corr_final")
     best_metric = -float("inf") if higher_is_better else float("inf")
@@ -323,6 +426,10 @@ def train(model, train_loader, val_loader, args, device, writer=None):
             optimizer.zero_grad()
             with torch.amp.autocast(device_type=device.type, enabled=scaler.is_enabled()):
                 y_final, y_seq, alpha, P_func, g, P_t = model(X_batch)
+                if 0 < burn_in < y_seq.shape[1] - 1:
+                    # First windows of a crop only warm up the GRU state / CLTA window
+                    y_seq, y_batch = y_seq[:, burn_in:], y_batch[:, burn_in:]
+                    alpha, P_func, g = alpha[:, burn_in:], P_func[:, burn_in:], g[:, burn_in:]
                 loss_total, loss_reg, loss_pred, loss_band, loss_graph = hast_loss_fn(
                     y_true=y_batch, y_final=y_final, y_seq=y_seq,
                     alpha=alpha, P_func=P_func, g=g,
@@ -389,7 +496,7 @@ def train(model, train_loader, val_loader, args, device, writer=None):
             "corr_seq": (corr_seq, True),
             "corr_final": (corr_final, True),
         }
-        metric, higher = metric_map.get(args.checkpoint_metric, (corr_final, True))
+        metric, higher = metric_map.get(args.checkpoint_metric, (corr_seq, True))
         better = metric > best_metric if higher else metric < best_metric
 
         if better:
@@ -441,8 +548,15 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=15)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--warmup-epochs", type=int, default=3)
-    parser.add_argument("--checkpoint-metric", type=str, default="corr_final",
+    parser.add_argument("--checkpoint-metric", type=str, default="corr_seq",
                         choices=["mae", "loss", "rmse", "corr_seq", "corr_final"])
+    parser.add_argument("--val-fraction", type=float, default=0.1,
+                        help="Fraction of training subjects held out per fold for early stopping / "
+                             "checkpoint selection (0 = select on the test subject, optimistic).")
+    parser.add_argument("--train-crop-len", type=int, default=128,
+                        help="Train on random crops of this many windows (0 = whole sessions).")
+    parser.add_argument("--burn-in", type=int, default=16,
+                        help="Leading windows of each crop excluded from the loss (state warm-up).")
 
     # Model architecture
     parser.add_argument("--num-channels", type=int, default=17)
@@ -462,11 +576,14 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.1)
 
     # Adjacency
-    parser.add_argument("--coords-path", type=str, default=None)
-    parser.add_argument("--coords-normalize", action="store_true", dest="coords_normalize", default=True)
-    parser.add_argument("--no-coords-normalize", dest="coords_normalize", action="store_false")
-    parser.add_argument("--adj-k", type=int, default=5)
-    parser.add_argument("--adj-sigma", type=float, default=1.0)
+    parser.add_argument("--channel-names", default=None,
+                        help="Comma-separated 10-20 channel names in data order (kNN graph from the "
+                             "standard_1005 montage). Usually set in the YAML config.")
+    parser.add_argument("--coords-path", type=str, default=None,
+                        help="Text file with (C, 2|3) electrode coordinates; overrides --channel-names.")
+    parser.add_argument("--adj-k", type=int, default=5, help="Physical kNN degree k.")
+    parser.add_argument("--dense-graph", action="store_true",
+                        help="Fully connected graph ('w/o Topo (dense)' ablation).")
 
     # Evaluation
     parser.add_argument("--n-folds", type=int, default=23)
@@ -482,7 +599,8 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--amp", dest="amp", action="store_true", default=True)
     parser.add_argument("--no-amp", dest="amp", action="store_false")
-    parser.add_argument("--augment", dest="augment", action="store_true", default=True)
+    parser.add_argument("--augment", dest="augment", action="store_true", default=False,
+                        help="Feature-noise augmentation (not part of the paper protocol).")
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--cache", dest="cache", action="store_true", default=True)
     parser.add_argument("--no-cache", dest="cache", action="store_false")
@@ -537,16 +655,19 @@ def main():
     dataset_name = getattr(args, "dataset", "seedvig")
     print(f"Dataset: {dataset_name} | Fold: {args.fold}/{args.n_folds}")
 
-    train_ds, val_ds = build_datasets(args, channel_indices)
+    train_ds, val_ds, test_ds, test_subjs = build_datasets(args, channel_indices)
+    if args.train_crop_len > 0:
+        train_ds = RandomCropDataset(train_ds, args.train_crop_len, args.burn_in)
+        print(f"Training on random crops of {args.train_crop_len} windows "
+              f"(burn-in {args.burn_in}): {len(train_ds)} crops/epoch")
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=args.num_workers, collate_fn=crop_collate,
     )
-    val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers,
-    )
+    # One session per batch so held-out sessions are evaluated over their full length
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=args.num_workers)
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=args.num_workers)
 
     # Adjacency
     adj = build_adjacency(args, num_channels, channel_indices)
@@ -581,10 +702,10 @@ def main():
         model.load_state_dict(torch.load(args.checkpoint, map_location=device))
         model.to(device)
         loss, mae, rmse, pcc_final, pcc_seq = evaluate(
-            model, val_loader,
+            model, test_loader,
             args.lambda_pred, args.lambda_band, args.lambda_graph, device,
         )
-        print(f"Evaluation results:")
+        print(f"Test results (subjects {test_subjs}):")
         print(f"  Loss={loss:.4f} | MAE={mae:.4f} | RMSE={rmse:.4f} | "
               f"PCC_final={pcc_final:.4f} | PCC_seq={pcc_seq:.4f}")
         return
@@ -602,10 +723,15 @@ def main():
 
     # Save
     os.makedirs(args.output_dir, exist_ok=True)
-    ckpt_path = os.path.join(args.output_dir, f"hast_{dataset_name}_fold{args.fold}.pth")
+    ckpt_path = os.path.join(args.output_dir, f"hast_{dataset_name}_fold{args.fold}_seed{args.seed}.pth")
     torch.save(model.state_dict(), ckpt_path)
     print(f"Best model saved: {ckpt_path}")
 
+    # Test-subject metrics of the selected model
+    _, mae, rmse, _, pcc = evaluate(
+        model, test_loader, args.lambda_pred, args.lambda_band, args.lambda_graph, device,
+    )
+    print(f"Test subjects {test_subjs}: PCC={pcc:.4f} | RMSE={rmse:.4f} | MAE={mae:.4f}")
 
 if __name__ == "__main__":
     main()
