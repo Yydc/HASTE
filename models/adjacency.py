@@ -38,13 +38,51 @@ def build_knn_gaussian(
     return adj
 
 
+def build_knn_adjacency(coords: np.ndarray, k: int = 5, self_loop: bool = True) -> torch.Tensor:
+    """
+    Physical graph A^phy in {0,1}^{C x C} (Sec 4.2): kNN rule on electrode
+    coordinates, symmetrized, with self-loops. coords: (C, 2 or 3)
+    """
+    coords = np.asarray(coords, dtype=np.float64)
+    C = coords.shape[0]
+    if coords.ndim != 2 or not 1 <= k < C:
+        raise ValueError(f"need coords of shape (C, D) and 1 <= k < C, got {coords.shape}, k={k}")
+    dist2 = ((coords[:, None, :] - coords[None, :, :]) ** 2).sum(-1)
+    np.fill_diagonal(dist2, np.inf)  # exclude self from the k neighbours
+    mask = np.zeros((C, C), dtype=np.float32)
+    for i in range(C):
+        mask[i, np.argsort(dist2[i], kind="stable")[:k]] = 1.0
+    mask = np.maximum(mask, mask.T)
+    if self_loop:
+        np.fill_diagonal(mask, 1.0)
+    return torch.from_numpy(mask)
+
+
+def coords_from_channel_names(channel_names) -> np.ndarray:
+    """3-D positions of 10-20 channel names (case-insensitive) from MNE's standard_1005 montage."""
+    import mne
+
+    pos = mne.channels.make_standard_montage("standard_1005").get_positions()["ch_pos"]
+    lut = {name.upper(): xyz for name, xyz in pos.items()}
+    missing = [n for n in channel_names if str(n).strip().upper() not in lut]
+    if missing:
+        raise ValueError(f"Channels not in the standard_1005 montage: {missing}")
+    return np.asarray([lut[str(n).strip().upper()] for n in channel_names], dtype=np.float64)
+
+
 def row_normalize(adj: torch.Tensor) -> torch.Tensor:
     """
-    Row-normalize adjacency to form a row-stochastic matrix (Eq. 10).
+    Row-normalize adjacency to form a row-stochastic matrix (Sec 4.2).
     P^phy_{ij} = A_{ij} / sum_k A_{ik}
     """
     row_sum = adj.sum(dim=-1, keepdim=True).clamp(min=1e-8)
     return adj / row_sum
 
 
-__all__ = ["build_full_adjacency", "build_knn_gaussian", "row_normalize"]
+__all__ = [
+    "build_full_adjacency",
+    "build_knn_gaussian",
+    "build_knn_adjacency",
+    "coords_from_channel_names",
+    "row_normalize",
+]

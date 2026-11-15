@@ -8,7 +8,9 @@ data_root: ./data_mpddf
 num_channels: 32
 num_bands: 5
 adj_k: 7
-adj_sigma: 1.0
+# Physical kNN graph needs the 32 electrode names in the order of your DE files, e.g.
+# channel_names: [FP1, FP2, ...]   (or pass --coords-path). Training stops until set.
+channel_names: null
 
 # Model architecture (shared with paper Table 2)
 spatial_d_model: 64
@@ -42,11 +44,16 @@ lambda_graph: 0.01
 n_folds: 50               # LOSO: 50 subjects
 fold: 0
 patience: 15
-checkpoint_metric: corr_final
+checkpoint_metric: corr_seq
+val_fraction: 0.1         # inner-validation subjects for early stopping (test subject never used)
+
+# Training protocol (not fixed by the paper; report in Table 2)
+train_crop_len: 512       # random crops of whole z-scored sessions
+burn_in: 32               # leading windows of a crop excluded from the loss
 
 # Misc
 seed: 2025
 amp: true
 cache: true
-augment: true
+augment: false            # no augmentation in the paper protocol
 num_workers: 4

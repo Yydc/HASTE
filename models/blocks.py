@@ -26,6 +26,18 @@ class CausalSpectralFusion(nn.Module):
         # Project GRU output to band weights
         self.fc = nn.Linear(d_r, num_bands)
 
+    def step(self, x_t: torch.Tensor, r: Optional[torch.Tensor] = None):
+        """
+        One streaming update. x_t: (batch, B, C); r: spectral state r_{t-1} (batch, d_r).
+        Returns x_fused (batch, C), alpha_t (batch, B), r_t (batch, d_r).
+        """
+        if r is None:
+            r = x_t.new_zeros(x_t.shape[0], self.d_r)
+        r = self.gru(x_t.mean(dim=2), r)
+        alpha_t = F.softmax(self.fc(r), dim=-1)
+        x_fused = (alpha_t.unsqueeze(-1) * x_t).sum(dim=1)
+        return x_fused, alpha_t, r
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         x: (batch, B, C, T)
@@ -62,7 +74,7 @@ class CausalSpectralFusion(nn.Module):
 
 class BandFunctionalPrior(nn.Module):
     """
-    Computes band-wise functional priors P^func_{t,b} on the physical graph (Sec 4.2, Eqs. 13-15).
+    Computes band-wise functional priors P^func_{t,b} on the physical graph (Sec 4.2, Eqs. 15-17).
     For each active band, embeds electrode features, computes low-dim similarity,
     and produces a row-stochastic prior via neighborhood softmax.
     """
@@ -100,54 +112,39 @@ class BandFunctionalPrior(nn.Module):
             embeddings_mean: (batch, T, d_embed) mean embedding for gate computation
         """
         batch, B, C, T = x.shape
-        device = x.device
-
-        # x rearranged to (batch, T, B, C)
         x_t = x.permute(0, 3, 1, 2)  # (batch, T, B, C)
 
-        neg_inf = torch.finfo(x.dtype).min
-        adj_mask = adj.unsqueeze(0).unsqueeze(0)  # (1, 1, C, C)
+        # Only the K active bands b in B_t are embedded and turned into priors (Algorithm 1)
+        K = int(active_mask.sum(dim=-1).max().item())
+        idx = active_mask.topk(K, dim=-1).indices                        # (batch, T, K)
+        w_act = active_alpha.gather(-1, idx)                             # (batch, T, K)
+        x_act = x_t.gather(-2, idx.unsqueeze(-1).expand(-1, -1, -1, C))  # (batch, T, K, C)
 
-        P_func_accum = torch.zeros(batch, T, C, C, device=device, dtype=x.dtype)
-        embed_accum = torch.zeros(batch, T, self.d_embed, device=device, dtype=x.dtype)
-        active_count = torch.zeros(batch, T, 1, device=device, dtype=x.dtype)
+        W_e = torch.stack([m.weight[:, 0] for m in self.band_embeds])    # (B, d_embed)
+        b_e = torch.stack([m.bias for m in self.band_embeds])            # (B, d_embed)
+        e = x_act.unsqueeze(-1) * W_e[idx].unsqueeze(-2) + b_e[idx].unsqueeze(-2)  # (batch, T, K, C, d)
 
-        for b in range(B):
-            # Embed: (batch, T, C, 1) -> (batch, T, C, d_embed)
-            e_b = self.band_embeds[b](x_t[:, :, b, :].unsqueeze(-1))  # (batch, T, C, d_embed)
+        # Low-dim similarity: (batch, T, K, C, C)
+        q = self.W_q(e)
+        k = self.W_k(e)
+        s = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_s)
 
-            # Low-dim projections
-            q = self.W_q(e_b)  # (batch, T, C, d_s)
-            k = self.W_k(e_b)  # (batch, T, C, d_s)
+        # Mask to physical edges, row-stochastic via neighborhood softmax
+        s = s.masked_fill(adj <= 0, torch.finfo(s.dtype).min)
+        P_b = F.softmax(s, dim=-1)
 
-            # Similarity: (batch, T, C, C)
-            s = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_s)
+        # Weighted by the renormalized active-band weights (Eq. 17)
+        P_func = (w_act.unsqueeze(-1).unsqueeze(-1) * P_b).sum(dim=2)    # (batch, T, C, C)
 
-            # Mask to physical edges
-            s = torch.where(adj_mask > 0, s, torch.full_like(s, neg_inf))
+        # Mean embedding over electrodes and active bands for the gate (Eq. 18)
+        embeddings_mean = e.mean(dim=(2, 3))                             # (batch, T, d_embed)
 
-            # Row-stochastic via neighborhood softmax
-            P_b = F.softmax(s, dim=-1)  # (batch, T, C, C)
-
-            # Weight by active_alpha for this band
-            w_b = active_alpha[:, :, b].unsqueeze(-1).unsqueeze(-1)  # (batch, T, 1, 1)
-            mask_b = active_mask[:, :, b].unsqueeze(-1).unsqueeze(-1)  # (batch, T, 1, 1)
-
-            P_func_accum = P_func_accum + w_b * mask_b * P_b
-
-            # Accumulate embeddings for gate (mean over C and active bands)
-            embed_accum = embed_accum + mask_b.squeeze(-1) * e_b.mean(dim=2)
-            active_count = active_count + mask_b.squeeze(-1).squeeze(-1).unsqueeze(-1)
-
-        # Mean embedding over active bands
-        embeddings_mean = embed_accum / active_count.clamp(min=1)  # (batch, T, d_embed)
-
-        return P_func_accum, embeddings_mean
+        return P_func, embeddings_mean
 
 
 class PriorMixingGate(nn.Module):
     """
-    Computes g_t = sigma(w_g^T e_bar_t + b_g) (Sec 4.2, Eq. 16).
+    Computes g_t = sigma(w_g^T e_bar_t + b_g) (Sec 4.2, Eq. 18).
     """
 
     def __init__(self, d_embed: int = 64):
@@ -165,7 +162,7 @@ class PriorMixingGate(nn.Module):
 
 class MultiHeadGraphAttention(nn.Module):
     """
-    Multi-head graph attention with additive log-bias from prior (Sec 4.3, Eq. 14).
+    Multi-head graph attention with additive log-bias from prior (Sec 4.3, Eq. 19).
     l_{ij} = LeakyReLU(a^T [Wh_i || Wh_j]) + beta * log(P_{ij} + eps)
     """
 
@@ -180,12 +177,8 @@ class MultiHeadGraphAttention(nn.Module):
         self.a_src = nn.Parameter(torch.empty(num_heads, self.d_head))
         self.a_dst = nn.Parameter(torch.empty(num_heads, self.d_head))
 
-        # Learnable prior strength: beta = log(1 + exp(beta_tilde)) > 0
-        self.beta_tilde = nn.Parameter(torch.tensor(1.0))
-
         self.leakyrelu = nn.LeakyReLU(alpha)
         self.dropout = nn.Dropout(dropout)
-        self.W_out = nn.Linear(d_model, d_model, bias=False)
 
         self.eps = 1e-6
         self.reset_parameters()
@@ -195,14 +188,15 @@ class MultiHeadGraphAttention(nn.Module):
             nn.init.xavier_uniform_(self.W[h])
         nn.init.xavier_uniform_(self.a_src)
         nn.init.xavier_uniform_(self.a_dst)
-        nn.init.xavier_uniform_(self.W_out.weight)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor,
-                prior: Optional[torch.Tensor] = None) -> torch.Tensor:
+                prior: Optional[torch.Tensor] = None,
+                beta: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         x: (B, N, D)
         adj: (N, N) binary adjacency
         prior: (B, N, N) row-stochastic prior P_t, or None
+        beta: prior strength beta > 0 (shared, see SpatialEncoder)
         """
         B, N, D = x.shape
         H = self.num_heads
@@ -217,7 +211,6 @@ class MultiHeadGraphAttention(nn.Module):
 
         # Add prior log-bias: beta * log(P_{ij} + eps)
         if prior is not None:
-            beta = F.softplus(self.beta_tilde)  # beta > 0
             log_prior = beta * torch.log(prior + self.eps)  # (B, N, N)
             e = e + log_prior.unsqueeze(1)  # broadcast over heads
 
@@ -230,31 +223,25 @@ class MultiHeadGraphAttention(nn.Module):
         attn = self.dropout(attn)
 
         h_prime = torch.matmul(attn, x_proj)  # (B, H, N, d_head)
-        h_prime = h_prime.permute(0, 2, 1, 3).contiguous().view(B, N, D)
-
-        out = self.W_out(h_prime)
-        return out
+        h_prime = h_prime.permute(0, 2, 1, 3).contiguous().view(B, N, D)  # Concat heads
+        return h_prime
 
 
 class SpatialTGALayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         self.attn = MultiHeadGraphAttention(d_model, num_heads, dropout)
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.act = nn.ELU()  # Paper Eq. 18: ELU activation
+        self.act = nn.ELU()  # Paper Eq. 21: ELU activation
 
     def forward(self, x_t: torch.Tensor, adj: torch.Tensor,
-                prior: Optional[torch.Tensor] = None) -> torch.Tensor:
-        h = self.attn(x_t, adj, prior=prior)
-        x_t = self.norm(x_t + self.dropout(h))
-        x_t = self.act(x_t)
-        return x_t
+                prior: Optional[torch.Tensor] = None,
+                beta: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.act(self.attn(x_t, adj, prior=prior, beta=beta))
 
 
 class TemporalBlock(nn.Module):
     """
-    Local causal self-attention over time (CLTA, Sec 4.3, Eq. 16).
+    Local causal self-attention over time (CLTA, Sec 4.3).
     """
 
     def __init__(
@@ -322,6 +309,29 @@ class TemporalBlock(nn.Module):
         ff = self.ffn(z)
         z = self.norm2(z + ff)
         return z
+
+    def step(self, z_t: torch.Tensor, cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None):
+        """
+        Streaming CLTA update. z_t: (B, D); cache: (K, V), each (B, H, <=L-1, d_head), or None.
+        Returns the output token and the cache of the last L-1 keys/values.
+        """
+        B, D = z_t.shape
+        H, d_head = self.num_heads, self.d_head
+
+        q = self.q_proj(z_t).view(B, H, 1, d_head)
+        k = self.k_proj(z_t).view(B, H, 1, d_head)
+        v = self.v_proj(z_t).view(B, H, 1, d_head)
+        if cache is not None:
+            k = torch.cat([cache[0], k], dim=2)
+            v = torch.cat([cache[1], v], dim=2)
+
+        attn = F.softmax(torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_head), dim=-1)
+        out = self.out_proj(torch.matmul(self.dropout(attn), v).reshape(B, D))
+
+        z = self.norm1(z_t + self.dropout(out))
+        z = self.norm2(z + self.ffn(z))
+        keep = self.window_size - 1
+        return z, ((k[:, :, -keep:], v[:, :, -keep:]) if keep > 0 else None)
 
 
 __all__ = [

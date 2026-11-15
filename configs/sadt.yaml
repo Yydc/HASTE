@@ -8,7 +8,9 @@ data_root: ./data_sadt
 num_channels: 30
 num_bands: 5
 adj_k: 7
-adj_sigma: 1.0
+# 30 scalp channels of the SADT release, A1/A2 removed (verify the order of your DE files)
+channel_names: [FP1, FP2, F7, F3, FZ, F4, F8, FT7, FC3, FCZ, FC4, FT8, T3, C3, CZ, C4, T4,
+                TP7, CP3, CPZ, CP4, TP8, T5, P3, PZ, P4, T6, O1, OZ, O2]
 
 # Model architecture (shared with paper Table 2)
 spatial_d_model: 64
@@ -42,11 +44,16 @@ lambda_graph: 0.01
 n_folds: 27               # LOSO: 27 subjects
 fold: 0
 patience: 15
-checkpoint_metric: corr_final
+checkpoint_metric: corr_seq
+val_fraction: 0.1         # inner-validation subjects for early stopping (test subject never used)
+
+# Training protocol (not fixed by the paper; report in Table 2)
+train_crop_len: 512       # random crops of whole z-scored sessions
+burn_in: 32               # leading windows of a crop excluded from the loss
 
 # Misc
 seed: 2025
 amp: true
 cache: true
-augment: true
+augment: false            # no augmentation in the paper protocol
 num_workers: 4

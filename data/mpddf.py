@@ -1,8 +1,8 @@
 """
-MPD-DF (Multi-Physiological-Data-based Driver Fatigue) dataset loader.
+MPD-DF dataset loader.
 
-Reference: Li et al., 2026. "MPD-DF: A multi-physiological-data-based
-driver fatigue dataset."
+Reference: Li et al., 2026. "Multimodal Phenotyping Dataset of Driving
+Fatigue." Scientific Data.
 
 Data: 50 subjects, 32-channel EEG, 500 Hz, ~2h simulated driving.
 Labels: Physician-annotated fatigue levels (5 ordered levels),
@@ -112,8 +112,9 @@ def _load_label_from_mat(mat: dict) -> np.ndarray:
     for key in ["fatigue_level", "fatigue", "label", "y"]:
         if key in mat:
             arr = np.squeeze(mat[key]).astype(np.float32)
-            # If discrete levels (1-5), map to [0,1]
-            if arr.max() > 1.0:
+            # Discrete levels (1-5) -> [0,1] via y = (l-1)/4 (Eq. 30). Always map
+            # 'fatigue_level', otherwise an all-level-1 session would be read as y=1.
+            if key == "fatigue_level" or arr.max() > 1.0:
                 arr = map_fatigue_levels(arr)
             return arr
     raise KeyError(f"Label not found in .mat, keys = {list(mat.keys())}")
